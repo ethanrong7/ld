@@ -14,7 +14,7 @@ import cv2
 import numpy as np
 
 from ld.capture.video_source import VideoSource, open_writer
-from ld.vision.cursor import find_cursor
+from ld.vision.cursor import find_cursor, strip_pointer
 from ld.vision.motion import estimate_translation, residual_map, to_gray_f32
 
 
@@ -27,7 +27,14 @@ def residual_peak(resid: np.ndarray, thresh: int = 60) -> tuple[float, float] | 
     return (float(cents[k][0]), float(cents[k][1]))
 
 
-def run(input_path: str, out_video: str, start: int, ema: float = 0.6) -> None:
+def run(
+    input_path: str,
+    out_video: str,
+    start: int,
+    ema: float = 0.6,
+    *,
+    strip_pointer_from_frames: bool = True,
+) -> None:
     src = VideoSource(input_path)
     m = src.meta
     writer = open_writer(out_video, m.width, m.height, m.fps)
@@ -37,6 +44,9 @@ def run(input_path: str, out_video: str, start: int, ema: float = 0.6) -> None:
     acc = None
     errs: list[float] = []
     for idx, frame in src.frames():
+        raw = frame
+        if strip_pointer_from_frames:
+            frame = strip_pointer(frame)
         if idx < start:
             prev_gray = to_gray_f32(frame)
             continue
@@ -51,12 +61,12 @@ def run(input_path: str, out_video: str, start: int, ema: float = 0.6) -> None:
         acc_u8 = acc.astype(np.uint8)
 
         peak = residual_peak(acc_u8)
-        gt = find_cursor(frame)
+        gt = find_cursor(raw)
         if peak and gt:
             errs.append(math.hypot(peak[0] - gt[0], peak[1] - gt[1]))
 
         heat = cv2.applyColorMap(acc_u8, cv2.COLORMAP_JET)
-        vis = cv2.addWeighted(frame, 0.6, heat, 0.4, 0)
+        vis = cv2.addWeighted(raw, 0.6, heat, 0.4, 0)
         if peak:
             cv2.drawMarker(vis, (int(peak[0]), int(peak[1])), (255, 255, 255),
                            cv2.MARKER_CROSS, 18, 2)
@@ -83,8 +93,18 @@ def main() -> None:
     ap.add_argument("--input", required=True)
     ap.add_argument("--out-video", required=True)
     ap.add_argument("--start", type=int, default=117)
+    ap.add_argument(
+        "--no-strip-pointer",
+        action="store_true",
+        help="disable green/mouse inpaint before motion residual (ablation only)",
+    )
     args = ap.parse_args()
-    run(args.input, args.out_video, args.start)
+    run(
+        args.input,
+        args.out_video,
+        args.start,
+        strip_pointer_from_frames=not args.no_strip_pointer,
+    )
 
 
 if __name__ == "__main__":

@@ -19,14 +19,84 @@ This section is written for an AI coding agent. Each step is bite-sized and
 self-contained. To resume: read the "Status" line, open the files named in the
 current step, and continue. Update the Status line + step checkboxes as you go.
 
-**Status: Steps 0–8 done. Next: Step 9 (eval harness) + Step 10 (CLI).**
-Tracker result (median / p90 err vs GT): t1 13.5 / 24.8 px, t2 11.2 / 19.1 px,
-t3 10.9 / 19.2 px. Stays locked on the correct shape on all three (heart, circle,
-star). Center is biased ~11–13 px (well inside the shape; functionally a correct
-hover). FINDING (Step 8): a persistent motion-compensated background MODEL
-regressed badly (model drift → median ~160 px). The chosen, better approach is
-**pairwise** stabilized differencing (`residual_map`) + gated weighted centroid +
-constant-velocity/-ω motion model. See Step 8 for details.
+**Status: Steps 0–10 + 11a done. Next: Step 11b (template match in tracker).**
+See **“Resume tomorrow — summary & roadmap”** below for findings, commands, and phases A→C.
+CLI: `python -m ld.main {probe|template|analyze|residual|track|eval}`.
+**Honest eval** (`python -m ld.main eval`, green GT inpainted before tracking):
+**0/10 PASS**, median-of-medians **56.5 px** (pass = median ≤ 25 px). Summary
+at `output/eval_summary.csv`. The earlier **10/10 PASS @ 13.6 px** was inflated:
+the solver never read green as an input, but the moving green crosshair acted as
+an implicit motion-residual beacon (ablation: t9 median 14.6 px → 51.8 px when
+stripped; t1 13.5 → 255). Default pipeline now calls `ld.vision.cursor.strip_pointer`
+on every frame before grayscale; use `--no-strip-pointer` only for ablation.
+FINDING (Step 8): persistent background model regressed (~160 px); **pairwise**
+`residual_map` + gated weighted centroid is kept but **not sufficient alone** once
+the cursor beacon is removed. FINDING (real capture): `ld1440p1` (no GT cursor)
+still drifts — needs template/appearance lock + live mouse-disk stripping at
+known screen coords (`track_video(..., mouse_at=...)`).
+
+## Resume tomorrow — summary & roadmap
+
+Read this section first when continuing. Steps 0–10 and **11a** are done; **11b**
+is the active work item.
+
+### What we learned (ground truth)
+
+| Finding | Implication |
+|--------|-------------|
+| **Honest eval** (default `strip_pointer`): **0/10 PASS**, median-of-medians **56.5 px** | Motion residual + gated centroid is **not** shippable alone |
+| Old **10/10 @ 13.6 px** with `--no-strip-pointer` | Inflated: green cursor was never a code input but acted as a **motion-residual beacon** |
+| **Runtime:** all normal runs **do** inpaint green before grayscale | `python -m ld.main track/eval` = honest; GT red dot in MP4 is scored on **raw** frames only |
+| **Tracker does not use rotation or template for position** | `omega`/`theta` are updated in state but `_gated_measurement` is **xy residual only**; `RoundInit.template` is unused in `tracker.py` |
+| **t1,t3,t4,… ~50–60 px** — visually “ballpark” | Asymmetric shapes **rotate** → stronger residual on the real target vs static embossed decoys (indirect cue, not template match) |
+| **t2 circle ~319 px** — wrong | No visible rotation; all decoys identical; late handoff (frame ~379); residual can’t pick the right blob |
+| **`ld1440p1`** | Panel crop works; track still drifts (weak page motion + no appearance lock) |
+| **Live mouse** | Same risk as green GT: moving **your** cursor paints the heatmap → strip at **known** `(x,y)` via `track_video(..., mouse_at=...)` |
+
+### How to run (tomorrow)
+
+```bash
+set PYTHONPATH=.
+.venv\Scripts\python.exe -m ld.main eval                    # honest metrics → output/eval_summary.csv
+.venv\Scripts\python.exe -m ld.main track --input data/t1_cropped_trimmed.mp4 --out-video output/t1_track.mp4
+.venv\Scripts\python.exe -m ld.main eval --no-strip-pointer # ablation only (misleading “pass”)
+```
+
+Latest honest **t1–t4** medians (px): t1 **59.2**, t2 **319.1**, t3 **50.8**, t4 **53.1**. Annotated MP4s:
+`output/t1_track.mp4` … `output/t4_track.mp4` (green box = prediction, red dot = GT).
+
+Key code: `ld/vision/cursor.py` (`strip_pointer`), `ld/solver.py` (`track_video`),
+`ld/vision/tracker.py` (measurement), `ld/vision/template.py` (countdown template + ω, not yet used in track).
+
+### Proposed path forward
+
+**Phase A — Fix measurement (do this next, highest ROI)**  
+Goal: honest eval median ≤ 25 px on most t* clips; separate strategy for circle.
+
+1. **Template match inside the gate** (`tracker.py`, Step 11b)  
+   - Use countdown binary template from `RoundInit`.  
+   - **Asymmetric** (heart, star, spade): search `(x,y)` + small θ window around prediction; seed ω from countdown.  
+   - **Symmetric** (circle): **no θ search** — translation-only match (NCC / edge on relief).  
+   - Detect symmetry from template shape or unreliable ω / angle variance during countdown.  
+2. **Fuse with residual** — template = primary; gated residual centroid = fallback when template score is weak. Circles: favor template + velocity.  
+3. **Small fixes** — mask predicted target disk before `phaseCorrelate`; don’t trust ω on symmetric countdown blobs; t2 late-handoff edge case.
+
+**Phase B — Real capture**  
+Promote `output/_crop_ld.py` logic into package; run on `data/ld1440p1.mp4` (9.4–16 s); same pointer strip (no green there).
+
+**Phase C — Live** (after offline is good enough)  
+Screen grab + `mouse_at` → `strip_pointer` + move mouse to predicted `(x,y)`.
+
+### Do not do next
+
+- Trust eval without pointer stripping.  
+- Reintroduce persistent background model (regressed ~160 px).  
+- Rotation search on circles.  
+- Expect residual-only tuning to go from ~56 px → ≤25 px.
+
+### Immediate next task
+
+Implement **Phase A.1 + A.2** in `ld/vision/tracker.py`, re-run `python -m ld.main eval`, regenerate track MP4s if improved.
 
 ## Context an agent must load first
 - Game: MapleStory "Lie Detector". The whole screen is a tan **relief/emboss**
@@ -60,8 +130,14 @@ constant-velocity/-ω motion model. See Step 8 for details.
   ONLY cue. Worst case: symmetric target momentarily moving at background velocity
   → no instantaneous cue → coast on the constant-velocity model until relative
   motion resumes.
-- **Green cursor** = ground-truth answer marker. Use it ONLY to score accuracy
-  on these labelled clips; NEVER as a solver input (real samples lack it).
+- **Green cursor** = ground-truth answer marker on t* clips. Use ONLY to score
+  accuracy (`find_cursor` in debug callbacks on raw frames). NEVER as a tracking
+  input. Before grayscale the pipeline **inpaints** green (and, in live mode, a
+  disk at the commanded mouse position) via `strip_pointer` so pointer motion
+  cannot create a self-fulfilling residual heatmap.
+- **Cursor confound (critical):** even a “cursor-blind” grayscale solver was
+  helped ~4× by the green marker’s motion in the residual — same risk when *you*
+  move the mouse over the target in live play. Stripping is mandatory on all paths.
 - Verified numbers (t1): handoff ≈ frame **117** (~1.9 s); rotation ≈
   **−1.7°/frame** (constant); residual localization median error **4.8 px**.
 
@@ -134,28 +210,46 @@ constant-velocity/-ω motion model. See Step 8 for details.
   rotating-template lock for ASYMMETRIC shapes to snap exactly onto centre and
   explicitly reject non-rotating neighbours; skip it for the symmetric circle.
 
-- [ ] **Step 9 — Evaluation harness.** `ld/debug/eval.py` runs the full pipeline
-  on all `data/t*_cropped_trimmed.mp4`, scores per-frame distance to green-cursor
-  GT, prints mean/median/p90 and a pass/fail (e.g. median ≤ 10 px). Writes a
-  summary CSV + per-clip annotated videos. Acceptance: table across t1..t10.
+- [x] **Step 9 — Evaluation harness.** `ld/debug/eval.py` runs `track_video` on all
+  `data/t*_cropped_trimmed.mp4`, scores distance to green-cursor GT (raw frame),
+  pass/fail median ≤ 25 px, writes `output/eval_summary.csv`.
+  **With pointer stripping (default): 0/10 PASS, median-of-medians 56.5 px.**
+  **Without stripping (`--no-strip-pointer`): ~10/10 PASS @ ~13.6 px** — not a
+  valid production metric (implicit cursor beacon). GT is only read in debug
+  callbacks; measurement frames are always preprocessed by `strip_pointer`.
 
-- [ ] **Step 10 — CLI integration.** Fill `ld/main.py` with subcommands:
-  `probe`, `analyze`, `residual`, `track`, `eval`. Thin wrappers over the debug
-  modules. Acceptance: `python -m ld.main track --input data/t1_...mp4` works.
+- [x] **Step 10 — CLI integration.** `ld/main.py` exposes subcommands
+  `probe`, `template`, `analyze`, `residual`, `track`, `eval` (thin wrappers over
+  the modules; each module also exposes a `run(...)` + `main()`). Verified:
+  `python -m ld.main track --input data/t4_...mp4` and `probe`/`template` work.
 
-- [ ] **Step 11 — Robustness / generalization.** Test on clips with the cursor
-  removed (`output/t*_nocursor.mp4` if present) and confirm the solver never reads
-  the cursor. Stress different shapes/resolutions; tune gates. Add fallbacks for
-  failed handoff detection (e.g. countdown trimmed). Acceptance: works without GT.
+- [x] **Step 11a — Pointer stripping (all pathways).** `ld/vision/cursor.py`:
+  `strip_pointer(frame, mouse_xy=..., strip_green=True)` — HSV green inpaint +
+  optional live-mouse disk. Called from `track_video`, `analyze_round`,
+  `residual_diag` by default. `track_video(..., mouse_at=idx->(x,y))` for live.
+  CLI: `--no-strip-pointer` on `template`/`residual`/`track`/`eval` for ablation only.
+  Acceptance: default runs never feed pointer pixels into grayscale/residual.
 
-- [ ] **Step 12 — Live mode (optional).** `ld/capture/screen.py` (screen grab) +
-  `ld/control/mouse.py` (move cursor to target). Wire into `main.py live`.
-  Acceptance: drives the real game; out of scope until offline accuracy is solid.
+- [ ] **Step 11b — Template / appearance lock.** Motion residual alone fails once
+  the cursor beacon is removed (see eval above) and on real captures (`ld1440p1`).
+  Add template correlation in the tracker gate as the **primary** measurement
+  (rotation search for asymmetric shapes only; **circles are symmetric** — match
+  on position/outline without θ, motion-only residual as fallback). Acceptance:
+  honest eval median ≤ 25 px on t* clips; stable track on nocursor / ld1440p1.
+
+- [ ] **Step 12 — Live mode (optional).** `ld/capture/screen.py` + `ld/control/mouse.py`
+  + `main.py live`. Pass last commanded mouse `(x,y)` into `strip_pointer` each frame
+  so your own cursor does not steer the heatmap. Acceptance: drives the real game.
 
 ## Key risks / notes for the implementer
+- **Pointer / cursor coupling:** any visible cursor (green GT or your mouse) creates
+  high-contrast motion in the residual at the pointer location. Always strip before
+  `to_gray_f32`. In live mode strip at **known** mouse coords, not only HSV green.
+- **Do not trust pre-stripping eval numbers** for product readiness; the ~13.6 px
+  headline was with the beacon present. Current honest baseline is ~56 px median.
 - **Velocity ambiguity:** when target motion ≈ background motion, residual fades.
-  Mitigated via the constant-velocity motion model (coast); the tracker reports
-  `measured=False` on those frames (only a handful per clip in practice).
+  Mitigated via coasting (`measured=False`); worse on real captures with long
+  stretches of near-zero page motion (e.g. `ld1440p1`).
 - **Robust background estimate:** the target biases phaseCorrelate slightly; it's
   a minority of pixels so it's usually fine, but consider masking the predicted
   target region before estimating background shift for extra robustness.

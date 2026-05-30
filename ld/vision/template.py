@@ -16,6 +16,7 @@ import numpy as np
 
 from ld.capture.video_source import VideoSource
 from ld.vision.countdown import detect_white_shape
+from ld.vision.cursor import strip_pointer
 
 
 @dataclass
@@ -66,12 +67,19 @@ def _center_template(mask: np.ndarray, size: int = 160) -> tuple[np.ndarray, flo
     return shifted, radius
 
 
-def analyze_round(input_path: str, max_scan: int | None = 400) -> RoundInit:
+def analyze_round(
+    input_path: str,
+    max_scan: int | None = 400,
+    *,
+    strip_pointer_from_frames: bool = True,
+) -> RoundInit:
     src = VideoSource(input_path)
     records: list[dict] = []
     handoff = None
     started = False
     for idx, frame in src.frames(max_scan):
+        if strip_pointer_from_frames:
+            frame = strip_pointer(frame)
         ws = detect_white_shape(frame)
         if ws is not None:
             started = True

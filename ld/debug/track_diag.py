@@ -1,7 +1,7 @@
-"""Step 7 diagnostic: full pipeline (countdown init -> seeded tracking).
+"""Step 7/8 diagnostic: run the solver on one clip, score vs GT, write video.
 
-Analyzes the countdown for the round init, then tracks the target post-handoff
-and scores per-frame distance to the green-cursor GT. Writes an annotated video.
+Thin wrapper over `ld.solver.track_video`. The green-cursor GT is read here (in
+the debug layer) only to measure error and draw the reference marker.
 """
 from __future__ import annotations
 
@@ -12,75 +12,76 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from ld.capture.video_source import VideoSource, open_writer
+from ld.capture.video_source import open_writer
+from ld.solver import track_video
 from ld.vision.cursor import find_cursor
-from ld.vision.motion import to_gray_f32
 from ld.vision.template import analyze_round
-from ld.vision.tracker import TargetTracker
 
 
-def run(input_path: str, out_video: str | None) -> None:
-    ri = analyze_round(input_path)
-    print(f"{Path(input_path).name}: handoff={ri.handoff_frame} "
-          f"omega={ri.omega_deg_per_frame:.2f}/f seed={ri.center_seed}")
-
-    src = VideoSource(input_path)
-    m = src.meta
-    writer = open_writer(out_video, m.width, m.height, m.fps) if out_video else None
-    tracker = None
-
-    prev_gray = None
-    start = ri.handoff_frame + 1
+def run(
+    input_path: str,
+    out_video: str | None,
+    *,
+    strip_pointer_from_frames: bool = True,
+) -> None:
+    ri = analyze_round(input_path, strip_pointer_from_frames=strip_pointer_from_frames)
     errs: list[float] = []
-    coast = 0
-    for idx, frame in src.frames():
-        if idx < start:
-            prev_gray = to_gray_f32(frame)
-            continue
-        cur_gray = to_gray_f32(frame)
-        if prev_gray is None:
-            prev_gray = cur_gray
-            continue
-        if tracker is None:
-            tracker = TargetTracker(ri, prev_gray)
+    coast = {"n": 0}
+    writer = {"w": None}
+    radius = {"r": ri.template_radius}
 
-        st = tracker.step(prev_gray, cur_gray)
+    def on_frame(idx, frame, st):
+        if writer["w"] is None and out_video:
+            h, w = frame.shape[:2]
+            writer["w"] = open_writer(out_video, w, h, 60.0)
         if not st.measured:
-            coast += 1
+            coast["n"] += 1
         gt = find_cursor(frame)
         if gt:
             errs.append(math.hypot(st.x - gt[0], st.y - gt[1]))
-
-        if writer is not None:
+        if writer["w"] is not None:
             vis = frame.copy()
             col = (0, 255, 0) if st.measured else (0, 165, 255)
-            cv2.circle(vis, (int(st.x), int(st.y)), int(ri.template_radius), col, 2)
-            cv2.drawMarker(vis, (int(st.x), int(st.y)), col, cv2.MARKER_CROSS, 16, 2)
+            ix, iy = int(st.x), int(st.y)
+            r = int(radius["r"])
+            cv2.rectangle(vis, (ix - r, iy - r), (ix + r, iy + r), col, 2)
+            cv2.drawMarker(vis, (ix, iy), col, cv2.MARKER_CROSS, 16, 2)
             if gt:
                 cv2.circle(vis, (int(gt[0]), int(gt[1])), 6, (0, 0, 255), 2)
-            cv2.putText(vis, f"f{idx} {'TRK' if st.measured else 'coast'}", (8, 20),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 3, cv2.LINE_AA)
-            cv2.putText(vis, f"f{idx} {'TRK' if st.measured else 'coast'}", (8, 20),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
-            writer.write(vis)
-        prev_gray = cur_gray
+            tag = "TRK" if st.measured else "coast"
+            for c, t in ((( 0, 0, 0), 3), ((255, 255, 255), 1)):
+                cv2.putText(vis, f"f{idx} {tag}", (8, 20),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, c, t, cv2.LINE_AA)
+            writer["w"].write(vis)
 
-    src.release()
-    if writer is not None:
-        writer.release()
+    res = track_video(
+        input_path,
+        on_frame=on_frame,
+        init=ri,
+        strip_pointer_from_frames=strip_pointer_from_frames,
+    )
+    print(f"{Path(input_path).name}: handoff={res.init.handoff_frame} "
+          f"omega={res.init.omega_deg_per_frame:.2f}/f seed={res.init.center_seed}")
+    if writer["w"] is not None:
+        writer["w"].release()
         print(f"wrote -> {out_video}")
     if errs:
         a = np.array(errs)
         print(f"scored={len(a)} mean={a.mean():.1f} median={np.median(a):.1f} "
-              f"p90={np.percentile(a,90):.1f} max={a.max():.1f} coast_frames={coast}")
+              f"p90={np.percentile(a,90):.1f} max={a.max():.1f} coast_frames={coast['n']}")
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", required=True)
     ap.add_argument("--out-video", default=None)
+    ap.add_argument(
+        "--no-strip-pointer",
+        action="store_true",
+        help="disable green/mouse inpaint before tracking (ablation only)",
+    )
     args = ap.parse_args()
-    run(args.input, args.out_video)
+    run(args.input, args.out_video, strip_pointer_from_frames=not args.no_strip_pointer)
 
 
 if __name__ == "__main__":
