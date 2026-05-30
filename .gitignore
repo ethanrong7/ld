@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Virtual env
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Generated / local runs
+output/
+
+# Large media (keep repo lean; data stays local)
+data/*.mp4
+data/*.mkv
+data/sample/
+
+# OS
+.DS_Store
+Thumbs.db
