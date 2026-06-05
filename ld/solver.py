@@ -65,7 +65,7 @@ def track_video(
             prev_gray = cur_gray
             continue
         if tracker is None:
-            tracker = TargetTracker(ri, prev_gray)
+            tracker = TargetTracker(ri, prev_gray, appearance_gray=cur_gray)
 
         st = tracker.step(prev_gray, cur_gray)
         states.append((idx, st))

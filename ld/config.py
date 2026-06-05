@@ -32,7 +32,7 @@ POINTER_INPAINT_RADIUS = 3
 POINTER_RADIUS = 28  # px; covers crosshair + ring at 744p; scale for live
 
 # --- Template matching (Step 11b) ------------------------------------------
-TEMPLATE_MATCH_MIN = 0.32       # min NCC to trust template vs residual
+TEMPLATE_MATCH_MIN = 0.22       # min NCC to trust template vs residual
 TEMPLATE_SEARCH_STEP = 4        # px stride in gated translation search
 TEMPLATE_THETA_STEP = 8.0       # deg per rotation hypothesis (asymmetric)
 TEMPLATE_THETA_RANGE = 20.0     # ±deg around predicted θ

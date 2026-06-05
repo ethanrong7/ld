@@ -17,6 +17,7 @@ import numpy as np
 from ld.capture.video_source import VideoSource
 from ld.vision.countdown import detect_white_shape
 from ld.vision.cursor import strip_pointer
+from ld.vision.match import is_symmetric_template  # noqa: F401 — used at init
 
 
 @dataclass
@@ -27,6 +28,7 @@ class RoundInit:
     omega_deg_per_frame: float  # fitted constant rotation rate
     handoff_frame: int          # last frame of opening white-present run
     n_clean: int                # how many clean frames contributed
+    symmetric: bool = False     # circle-like: translation-only template match
 
 
 def _unwrap_deg(angles: list[float], max_step: float = 90.0) -> list[float]:
@@ -122,11 +124,15 @@ def analyze_round(
     seed_rec = clean[-1]
     seed = (seed_rec["ws"].cx, seed_rec["ws"].cy)
 
+    angle_span = float(unwrapped[-1] - unwrapped[0]) if len(unwrapped) >= 2 else 0.0
+    symmetric = is_symmetric_template(template, slope, angle_span)
+
     return RoundInit(
         template=template,
         template_radius=radius,
         center_seed=seed,
-        omega_deg_per_frame=slope,
+        omega_deg_per_frame=0.0 if symmetric else slope,
         handoff_frame=handoff if handoff is not None else records[-1]["idx"],
         n_clean=len(clean),
+        symmetric=symmetric,
     )
