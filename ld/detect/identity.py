@@ -75,6 +75,16 @@ GRAPH_DECAY = 0.94              # recent frames weigh more in path score
 GRAPH_SWITCH_MARGIN = 2.0       # trajectory wins over paper only above this gap
 TRAJ_REACQ_LOST = 3             # coast frames before Viterbi re-acquire
 PAPER_INLIER_MAX = 2.5   # px; fake boxes used to refine sheet fit
+# Causal accumulating-evidence tracker (mode "accum"). The real shape is the
+# persistent motion outlier; integrate per-tracklet residual over time and only
+# switch the locked identity with hysteresis, so a momentary pause (residual ->0)
+# cannot lose it and per-frame residual noise cannot make the pick jitter.
+ACCUM_RESID_FLOOR = 1.5    # px; residual below this is paper noise -> no evidence
+ACCUM_DECAY = 0.97         # leaky-sum memory (~33-frame half-life; pause-robust)
+ACCUM_CLAMP = 40.0         # cap accumulated evidence so one frame can't dominate
+ACCUM_SWITCH_MARGIN = 12.0  # challenger must lead the incumbent's evidence by this...
+ACCUM_SWITCH_K = 18         # ...for this many consecutive frames before switching
+ACCUM_REBIND_GATE = 1.6    # x gate: radius to re-bind incumbent when IoU assoc breaks
 LOCK_MASK_MIN = 0.01     # min mask overlap before anchor fallback
 WHITE_TELEPORT_PX = 80.0 # START-text false positive jumps farther than this
 RIGID_RANSAC_THRESH = 3.0
@@ -1223,6 +1233,167 @@ def track_paper_identity(clip: str | Path, packs: list[FusionPack],
     return track, locked_hist, start, radius
 
 
+def track_accum_identity(clip: str | Path, packs: list[FusionPack],
+                         lock: LockInfo | None = None, *,
+                         gate_radius: float | None = None,
+                         frame_wh: tuple[int, int] | None = None
+                         ) -> tuple[list[TrackPoint], list[int | None], int, float]:
+    """Causal accumulating-evidence identity tracker.
+
+    Every detected shape is a persistent tracklet accumulating an
+    independent-motion evidence score (leaky integrator of its residual from the
+    fitted paper motion). The locked identity is *followed* frame-to-frame (by
+    IoU, falling back to motion-predicted proximity when the real shape's
+    independent motion breaks IoU) rather than re-picked, so the per-frame
+    position does not jitter. The lock only switches to a challenger tracklet
+    when that challenger's accumulated evidence leads the incumbent's by
+    ACCUM_SWITCH_MARGIN for ACCUM_SWITCH_K consecutive frames.
+    """
+    clip = Path(clip)
+    seed_x, seed_y, radius, start = _seed(packs)  # type: ignore[arg-type]
+    lock_frame = lock.frame if lock is not None else start
+    gate = gate_radius or max(GATE_RADIUS, 1.3 * radius)
+    rebind_gate = ACCUM_REBIND_GATE * gate
+    pos = np.array([seed_x, seed_y], np.float32)
+    vel = np.zeros(2, np.float32)
+    lost = 0
+    incumbent_tid: int | None = None
+    tracks: list[BoxTrack] = []
+    next_tid = 0
+    prev_boxes: list[tuple] = []
+    prev_gray: np.ndarray | None = None
+    evidence: dict[int, float] = {}
+    switch_streak = 0
+    fw, fh = frame_wh if frame_wh else (None, None)
+
+    track: list[TrackPoint] = []
+    locked_hist: list[int | None] = []
+
+    src = VideoSource(clip)
+    for idx, raw in src.frames():
+        if idx >= len(packs):
+            break
+        p = packs[idx]
+        stripped = strip_pointer(raw, strip_green=True)
+        gray = cv2.cvtColor(stripped, cv2.COLOR_BGR2GRAY)
+
+        # --- pre-lock: follow the white countdown shape, no identity yet ---
+        if p.idx < lock_frame or math.isnan(pos[0]):
+            track.append(TrackPoint(p.idx, float(pos[0]), float(pos[1]), "acquire", len(p.boxes)))
+            locked_hist.append(None)
+            if p.white is not None:
+                pos = np.array([p.white[0], p.white[1]], np.float32)
+            prev_gray = gray
+            prev_boxes = list(p.boxes)
+            continue
+
+        # --- lock frame: seed the incumbent identity from the countdown lock ---
+        if p.idx == lock_frame and incumbent_tid is None:
+            if lock is not None and p.boxes:
+                tracks, next_tid, incumbent_tid = _locked_tid_on_frame(p.boxes, lock, next_tid)
+                pos = np.array([lock.cx, lock.cy], np.float32)
+            elif p.boxes:
+                tracks, next_tid = _associate([], p.boxes, next_tid)
+                incumbent_tid = tracks[0].tid
+                pos = np.array([tracks[0].cx, tracks[0].cy], np.float32)
+            vel[:] = 0.0
+            evidence = {t.tid: 0.0 for t in tracks}
+            track.append(TrackPoint(p.idx, float(pos[0]), float(pos[1]), "acquire", len(p.boxes)))
+            locked_hist.append(incumbent_tid)
+            prev_boxes = list(p.boxes)
+            prev_gray = gray
+            continue
+
+        tracks, next_tid = _associate(tracks, p.boxes, next_tid)
+        pos_prev = pos.copy()
+        pred = pos + vel
+
+        # --- paper motion + per-box residual from the rigid sheet ---
+        paper_resid = [0.0] * len(p.boxes)
+        if prev_gray is not None and prev_boxes and p.boxes:
+            paper_T = estimate_paper_motion(prev_gray, gray, p.boxes)
+            paper_T = _refine_paper_from_fakes(prev_boxes, p.boxes, paper_T)
+            paper_resid = _paper_box_residuals(prev_boxes, p.boxes, paper_T)
+
+        # --- accumulate evidence per tracklet (leaky integrator) ---
+        seen: set[int] = set()
+        for i, box in enumerate(p.boxes):
+            tid = _tid_for_box(tracks, box)
+            if tid is None:
+                continue
+            e = max(0.0, paper_resid[i] - ACCUM_RESID_FLOOR)
+            evidence[tid] = min(ACCUM_CLAMP, ACCUM_DECAY * evidence.get(tid, 0.0) + e)
+            seen.add(tid)
+        for tid in list(evidence):
+            if tid not in seen:
+                evidence[tid] *= ACCUM_DECAY
+
+        # --- follow the incumbent identity (IoU assoc; re-bind on break) ---
+        inc = next((t for t in tracks if t.tid == incumbent_tid), None)
+        if inc is None and p.boxes:
+            # The real shape's independent motion likely broke IoU continuity.
+            # Re-bind among boxes near the prediction, preferring the one with the
+            # most accumulated evidence (the integrated outlier), not whichever
+            # fake happens to sit nearest the prediction this frame.
+            cands = [b for b in p.boxes
+                     if math.hypot(_centroid(b)[0] - pred[0], _centroid(b)[1] - pred[1]) <= rebind_gate]
+            if cands:
+                def _rebind_key(b: tuple) -> tuple[float, float]:
+                    tid = _tid_for_box(tracks, b)
+                    ev = evidence.get(tid, 0.0) if tid is not None else 0.0
+                    dist = math.hypot(_centroid(b)[0] - pred[0], _centroid(b)[1] - pred[1])
+                    return (ev, -dist)
+                box = max(cands, key=_rebind_key)
+                incumbent_tid = _tid_for_box(tracks, box)
+                inc = next((t for t in tracks if t.tid == incumbent_tid), None)
+                switch_streak = 0
+
+        # --- hysteresis switch to a higher-evidence challenger ---
+        inc_ev = evidence.get(incumbent_tid, 0.0) if incumbent_tid is not None else -1.0
+        challengers = [(t.tid, evidence.get(t.tid, 0.0)) for t in tracks if t.tid != incumbent_tid]
+        if challengers:
+            ch_tid, ch_ev = max(challengers, key=lambda kv: kv[1])
+            if ch_ev - inc_ev >= ACCUM_SWITCH_MARGIN:
+                switch_streak += 1
+            else:
+                switch_streak = 0
+            if switch_streak >= ACCUM_SWITCH_K:
+                incumbent_tid = ch_tid
+                inc = next((t for t in tracks if t.tid == incumbent_tid), inc)
+                switch_streak = 0
+
+        chosen = inc.box if inc is not None else None
+        if chosen is not None:
+            cx, cy = _centroid(chosen)
+            target = np.array([cx, cy], np.float32)
+            pos = (1.0 - UPDATE_ALPHA) * pred + UPDATE_ALPHA * target
+            lost = 0
+            state = "track"
+        else:
+            pos = pred
+            lost += 1
+            state = "coast"
+            if lost >= COAST_PATIENCE:
+                vel[:] = 0.0
+
+        vel = VEL_DAMP * vel + (1.0 - VEL_DAMP) * (pos - pos_prev)
+        sp = float(np.hypot(*vel))
+        if sp > VEL_MAX:
+            vel *= VEL_MAX / sp
+
+        if fw is not None:
+            pos = np.array([float(np.clip(pos[0], 0, fw - 1)),
+                            float(np.clip(pos[1], 0, fh - 1))], np.float32)
+
+        track.append(TrackPoint(p.idx, float(pos[0]), float(pos[1]), state, len(p.boxes)))
+        locked_hist.append(incumbent_tid)
+        prev_boxes = list(p.boxes)
+        prev_gray = gray
+
+    src.release()
+    return track, locked_hist, start, radius
+
+
 def score_identity(packs: list[FusionPack], track: list[TrackPoint], start: int,
                    radius: float, clip_name: str) -> IdentityReport:
     gt = {p.idx: p.gt for p in packs if p.gt is not None}
@@ -1343,7 +1514,7 @@ _PAPER_PICK_MODES = (
 
 # All selectable modes, in leaderboard order. Single source of truth shared by
 # run_clip's argparse and the eval_modes harness so the two never drift.
-ALL_MODES = ("chain", *_PAPER_PICK_MODES, "outlier")
+ALL_MODES = ("chain", *_PAPER_PICK_MODES, "outlier", "accum")
 
 
 def _dispatch_mode(clip: Path, packs: list[FusionPack], lock: LockInfo | None,
@@ -1356,6 +1527,8 @@ def _dispatch_mode(clip: Path, packs: list[FusionPack], lock: LockInfo | None,
     """
     if mode in _PAPER_PICK_MODES:
         return track_paper_identity(clip, packs, lock, frame_wh=frame_wh, pick_mode=mode)
+    if mode == "accum":
+        return track_accum_identity(clip, packs, lock, frame_wh=frame_wh)
     if mode == "outlier":
         from ld.detect.outlier_track import track_outlier_identity
         return track_outlier_identity(clip, packs, lock, frame_wh=frame_wh)
