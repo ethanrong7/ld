@@ -31,6 +31,7 @@ data/detect/dataset/
 data/detect/runs/
 data/detect/cache/
 data/detect/evidence/
+data/detect/eval/
 data/detect/_*.png
 # Ultralytics writes these to the cwd on first train/predict.
 /yolov8n.pt

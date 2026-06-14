@@ -1333,6 +1333,35 @@ def _render_evidence(clip: Path, packs: list[FusionPack], track: list[TrackPoint
     src.release()
 
 
+# Modes routed through track_paper_identity (pick_mode == mode). Everything else
+# is dispatched specially in _dispatch_mode (outlier tracker, or chain fallback).
+_PAPER_PICK_MODES = (
+    "paper", "hypothesis", "hypothesis_paper", "hybrid", "hybrid_unified",
+    "paper_free", "paper_reacq", "trajectory", "trajectory_paper",
+    "trajectory_reacq", "paper_outlier", "paper_outlier_rank",
+)
+
+# All selectable modes, in leaderboard order. Single source of truth shared by
+# run_clip's argparse and the eval_modes harness so the two never drift.
+ALL_MODES = ("chain", *_PAPER_PICK_MODES, "outlier")
+
+
+def _dispatch_mode(clip: Path, packs: list[FusionPack], lock: LockInfo | None,
+                   frame_wh: tuple[int, int], mode: str
+                   ) -> tuple[list[TrackPoint], list[int | None], int, float]:
+    """Run one identity mode -> (track, locked_hist, start, radius).
+
+    Single dispatch point for every pick mode, reused by both run_clip and the
+    eval_modes leaderboard so a mode behaves identically in both.
+    """
+    if mode in _PAPER_PICK_MODES:
+        return track_paper_identity(clip, packs, lock, frame_wh=frame_wh, pick_mode=mode)
+    if mode == "outlier":
+        from ld.detect.outlier_track import track_outlier_identity
+        return track_outlier_identity(clip, packs, lock, frame_wh=frame_wh)
+    return track_identity(packs, lock, frame_wh=frame_wh)
+
+
 def run_clip(weights: str | Path, clip: str | Path, *, conf: float = 0.25,
              imgsz: int = 768, use_cache: bool = True, evidence: bool = False,
              mode: str = "paper") -> IdentityReport:
@@ -1343,48 +1372,7 @@ def run_clip(weights: str | Path, clip: str | Path, *, conf: float = 0.25,
     src = VideoSource(clip)
     wh = (src.meta.width, src.meta.height)
     src.release()
-    if mode == "paper":
-        track, locked_hist, start, radius = track_paper_identity(
-            clip, packs, lock, frame_wh=wh, pick_mode="paper")
-    elif mode == "hypothesis":
-        track, locked_hist, start, radius = track_paper_identity(
-            clip, packs, lock, frame_wh=wh, pick_mode="hypothesis")
-    elif mode == "hypothesis_paper":
-        track, locked_hist, start, radius = track_paper_identity(
-            clip, packs, lock, frame_wh=wh, pick_mode="hypothesis_paper")
-    elif mode == "hybrid":
-        track, locked_hist, start, radius = track_paper_identity(
-            clip, packs, lock, frame_wh=wh, pick_mode="hybrid")
-    elif mode == "hybrid_unified":
-        track, locked_hist, start, radius = track_paper_identity(
-            clip, packs, lock, frame_wh=wh, pick_mode="hybrid_unified")
-    elif mode == "paper_free":
-        track, locked_hist, start, radius = track_paper_identity(
-            clip, packs, lock, frame_wh=wh, pick_mode="paper_free")
-    elif mode == "paper_reacq":
-        track, locked_hist, start, radius = track_paper_identity(
-            clip, packs, lock, frame_wh=wh, pick_mode="paper_reacq")
-    elif mode == "trajectory":
-        track, locked_hist, start, radius = track_paper_identity(
-            clip, packs, lock, frame_wh=wh, pick_mode="trajectory")
-    elif mode == "trajectory_paper":
-        track, locked_hist, start, radius = track_paper_identity(
-            clip, packs, lock, frame_wh=wh, pick_mode="trajectory_paper")
-    elif mode == "trajectory_reacq":
-        track, locked_hist, start, radius = track_paper_identity(
-            clip, packs, lock, frame_wh=wh, pick_mode="trajectory_reacq")
-    elif mode == "outlier":
-        from ld.detect.outlier_track import track_outlier_identity
-        track, locked_hist, start, radius = track_outlier_identity(
-            clip, packs, lock, frame_wh=wh)
-    elif mode == "paper_outlier":
-        track, locked_hist, start, radius = track_paper_identity(
-            clip, packs, lock, frame_wh=wh, pick_mode="paper_outlier")
-    elif mode == "paper_outlier_rank":
-        track, locked_hist, start, radius = track_paper_identity(
-            clip, packs, lock, frame_wh=wh, pick_mode="paper_outlier_rank")
-    else:
-        track, locked_hist, start, radius = track_identity(packs, lock, frame_wh=wh)
+    track, locked_hist, start, radius = _dispatch_mode(clip, packs, lock, wh, mode)
     report = score_identity(packs, track, start, radius, name)
     if evidence:
         out = DETECT_DIR / "evidence" / f"{clip.stem}_identity.mp4"
@@ -1408,10 +1396,7 @@ def main() -> None:
     ap.add_argument("--no-cache", action="store_true")
     ap.add_argument("--evidence", action="store_true")
     ap.add_argument("--mode",
-                    choices=("chain", "paper", "hypothesis", "hypothesis_paper",
-                             "paper_free", "paper_reacq", "hybrid", "hybrid_unified",
-                             "trajectory", "trajectory_paper", "trajectory_reacq",
-                             "outlier", "paper_outlier", "paper_outlier_rank"),
+                    choices=ALL_MODES,
                     default="paper",
                     help="paper=default; paper_outlier_rank=switch on low residual rank; "
                          "paper_outlier=paper + coast outlier switch; "
