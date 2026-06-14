@@ -1478,11 +1478,23 @@ def track_accum_identity(clip: str | Path, packs: list[FusionPack],
 FIELD_SNAP_FRAC = 1.0   # snap field output to nearest YOLO box within this x gate
 
 
+def _box_saliency_mass(box: tuple, sal: np.ndarray) -> float:
+    h, w = sal.shape
+    x1, y1 = max(0, int(box[0])), max(0, int(box[1]))
+    x2, y2 = min(w, int(box[2])), min(h, int(box[3]))
+    if x2 <= x1 or y2 <= y1:
+        return 0.0
+    return float(sal[y1:y2, x1:x2].sum())
+
+
 def track_field_identity(clip: str | Path, packs: list[FusionPack],
                          lock: LockInfo | None = None, *,
                          gate_radius: float | None = None,
                          frame_wh: tuple[int, int] | None = None,
-                         yolo_snap: bool = True
+                         yolo_snap: bool = True,
+                         snap_frac: float = FIELD_SNAP_FRAC,
+                         snap_mode: str = "mass",
+                         snap_feedback: bool = True
                          ) -> tuple[list[TrackPoint], list[int | None], int, float]:
     """Position-field tracker: identity-free, fragmentation-immune.
 
@@ -1490,8 +1502,13 @@ def track_field_identity(clip: str | Path, packs: list[FusionPack],
     saliency from `motion.estimate_motion`, EMA-smoothed and gated by a
     constant-velocity model in `OutlierTracker`) rather than per tracklet — so the
     real shape's identity fragmenting across YOLO boxes (the diagnosed limiter)
-    cannot lose it. The tracked peak is optionally snapped to the nearest YOLO box
-    centroid each frame, fusing the healthy detector for precise localization.
+    cannot lose it. The tracked peak is snapped to a YOLO box each frame, fusing the
+    healthy detector for precise localization.
+
+    snap_mode: "nearest" = box centroid nearest the tracked peak; "mass" = box with
+    the most saliency inside it among boxes within the snap radius (field-native).
+    snap_feedback: write the snapped position back into the tracker so it stays
+    box-anchored between frames (reduces drift).
     """
     from ld.track.tracker import OutlierTracker
     from ld.vision.motion import estimate_motion, saliency_map
@@ -1500,7 +1517,7 @@ def track_field_identity(clip: str | Path, packs: list[FusionPack],
     seed_x, seed_y, radius, start = _seed(packs)  # type: ignore[arg-type]
     lock_frame = lock.frame if lock is not None else start
     gate = gate_radius or max(GATE_RADIUS, 1.3 * radius)
-    snap_dist = FIELD_SNAP_FRAC * gate
+    snap_dist = snap_frac * gate
     pos = np.array([seed_x, seed_y], np.float32)
     tracker: OutlierTracker | None = None
     prev_gray: np.ndarray | None = None
@@ -1535,6 +1552,7 @@ def track_field_identity(clip: str | Path, packs: list[FusionPack],
 
         state = "coast"
         x, y = float(pos[0]), float(pos[1])
+        sal = None
         if prev_gray is not None and tracker is not None:
             field = estimate_motion(prev_gray, gray)
             sal = saliency_map(field, gray.shape)
@@ -1542,10 +1560,17 @@ def track_field_identity(clip: str | Path, packs: list[FusionPack],
             x, y, state = tp.x, tp.y, tp.state
 
         if yolo_snap and p.boxes:
-            nb = min(p.boxes, key=lambda b: math.hypot(_centroid(b)[0] - x, _centroid(b)[1] - y))
-            ncx, ncy = _centroid(nb)
-            if math.hypot(ncx - x, ncy - y) <= snap_dist:
-                x, y = ncx, ncy
+            near = [b for b in p.boxes
+                    if math.hypot(_centroid(b)[0] - x, _centroid(b)[1] - y) <= snap_dist]
+            chosen = None
+            if snap_mode == "mass" and near and sal is not None and sal.max() > 0:
+                chosen = max(near, key=lambda b: _box_saliency_mass(b, sal))
+            elif near:
+                chosen = min(near, key=lambda b: math.hypot(_centroid(b)[0] - x, _centroid(b)[1] - y))
+            if chosen is not None:
+                x, y = _centroid(chosen)
+                if snap_feedback and tracker is not None:
+                    tracker.pos = np.array([x, y], np.float32)
 
         if fw is not None:
             x = float(np.clip(x, 0, fw - 1))
