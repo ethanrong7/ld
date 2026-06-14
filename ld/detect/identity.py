@@ -85,6 +85,16 @@ ACCUM_CLAMP = 40.0         # cap accumulated evidence so one frame can't dominat
 ACCUM_SWITCH_MARGIN = 12.0  # challenger must lead the incumbent's evidence by this...
 ACCUM_SWITCH_K = 18         # ...for this many consecutive frames before switching
 ACCUM_REBIND_GATE = 1.6    # x gate: radius to re-bind incumbent when IoU assoc breaks
+# Independent-rotation evidence (Phase 3). The real shape rotates on its own; fakes
+# only inherit the sheet's global rotation. Measure each box's frame-to-frame
+# rotation by log-polar phase correlation, subtract the global sheet rotation
+# (from the paper affine), and accumulate the net per tracklet as a second
+# evidence channel fused with translation. ROT_WEIGHT=0 disables it (== plain accum).
+ROT_WEIGHT = 5.0         # weight of rotation evidence vs translation (0 = off)
+ROT_FLOOR = 0.06         # rad (~3.4 deg); net rotation below this is noise
+ROT_MIN_RESPONSE = 0.35  # min phase-correlation peak to trust a rotation reading
+ROT_ROI_N = 48           # log-polar ROI resample size (px)
+ROT_MIN_SIDE = 24        # px; skip boxes smaller than this (rotation unreliable)
 LOCK_MASK_MIN = 0.01     # min mask overlap before anchor fallback
 WHITE_TELEPORT_PX = 80.0 # START-text false positive jumps farther than this
 RIGID_RANSAC_THRESH = 3.0
@@ -1233,6 +1243,59 @@ def track_paper_identity(clip: str | Path, packs: list[FusionPack],
     return track, locked_hist, start, radius
 
 
+_ROT_HAN: np.ndarray | None = None
+
+
+def _logpolar_roi(gray: np.ndarray, box: tuple, n: int) -> np.ndarray | None:
+    """Resampled log-polar view of a box ROI; rotation -> vertical shift."""
+    h, w = gray.shape
+    x1, y1 = max(0, int(box[0])), max(0, int(box[1]))
+    x2, y2 = min(w, int(box[2])), min(h, int(box[3]))
+    if x2 - x1 < ROT_MIN_SIDE or y2 - y1 < ROT_MIN_SIDE:
+        return None
+    roi = cv2.resize(gray[y1:y2, x1:x2], (n, n)).astype(np.float32)
+    return cv2.warpPolar(roi, (n, n), (n / 2.0, n / 2.0), n / 2.0, cv2.WARP_POLAR_LOG)
+
+
+def _box_net_rotations(prev_boxes: list[tuple], prev_gray: np.ndarray,
+                       curr_boxes: list[tuple], cur_gray: np.ndarray,
+                       theta_global: float) -> list[float | None]:
+    """Per-current-box net rotation (rad) vs the global sheet rotation.
+
+    Each box is matched to its best-IoU box in the previous frame (the real shape
+    rotating in place keeps high IoU, so it matches); log-polar phase correlation
+    recovers its absolute rotation, from which the sheet rotation is subtracted.
+    None where unmatched, ROI too small, or correlation unconfident.
+    """
+    global _ROT_HAN
+    if _ROT_HAN is None:
+        _ROT_HAN = cv2.createHanningWindow((ROT_ROI_N, ROT_ROI_N), cv2.CV_32F)
+    out: list[float | None] = []
+    for cb in curr_boxes:
+        best_prev: tuple | None = None
+        best_iou = IOU_MATCH_MIN
+        for pb in prev_boxes:
+            v = _iou(pb, cb)
+            if v > best_iou:
+                best_iou, best_prev = v, pb
+        if best_prev is None:
+            out.append(None)
+            continue
+        lp0 = _logpolar_roi(prev_gray, best_prev, ROT_ROI_N)
+        lp1 = _logpolar_roi(cur_gray, cb, ROT_ROI_N)
+        if lp0 is None or lp1 is None:
+            out.append(None)
+            continue
+        (_dx, dy), resp = cv2.phaseCorrelate(lp0, lp1, _ROT_HAN)
+        if resp < ROT_MIN_RESPONSE:
+            out.append(None)
+            continue
+        theta_box = dy / ROT_ROI_N * 2.0 * math.pi
+        d = (theta_box - theta_global + math.pi) % (2.0 * math.pi) - math.pi
+        out.append(abs(d))
+    return out
+
+
 def track_accum_identity(clip: str | Path, packs: list[FusionPack],
                          lock: LockInfo | None = None, *,
                          gate_radius: float | None = None,
@@ -1263,8 +1326,15 @@ def track_accum_identity(clip: str | Path, packs: list[FusionPack],
     prev_boxes: list[tuple] = []
     prev_gray: np.ndarray | None = None
     evidence: dict[int, float] = {}
+    rot_evidence: dict[int, float] = {}
     switch_streak = 0
     fw, fh = frame_wh if frame_wh else (None, None)
+
+    def total_ev(tid: int | None) -> float:
+        """Fused translation + rotation evidence for a tracklet."""
+        if tid is None:
+            return -1.0
+        return evidence.get(tid, 0.0) + ROT_WEIGHT * rot_evidence.get(tid, 0.0)
 
     track: list[TrackPoint] = []
     locked_hist: list[int | None] = []
@@ -1310,12 +1380,18 @@ def track_accum_identity(clip: str | Path, packs: list[FusionPack],
 
         # --- paper motion + per-box residual from the rigid sheet ---
         paper_resid = [0.0] * len(p.boxes)
+        rot_nets: list[float | None] = [None] * len(p.boxes)
         if prev_gray is not None and prev_boxes and p.boxes:
             paper_T = estimate_paper_motion(prev_gray, gray, p.boxes)
             paper_T = _refine_paper_from_fakes(prev_boxes, p.boxes, paper_T)
             paper_resid = _paper_box_residuals(prev_boxes, p.boxes, paper_T)
+            if ROT_WEIGHT > 0.0:
+                theta_global = (math.atan2(paper_T[1, 0], paper_T[0, 0])
+                                if paper_T is not None else 0.0)
+                rot_nets = _box_net_rotations(
+                    prev_boxes, prev_gray, p.boxes, gray, theta_global)
 
-        # --- accumulate evidence per tracklet (leaky integrator) ---
+        # --- accumulate translation + rotation evidence per tracklet ---
         seen: set[int] = set()
         for i, box in enumerate(p.boxes):
             tid = _tid_for_box(tracks, box)
@@ -1323,10 +1399,16 @@ def track_accum_identity(clip: str | Path, packs: list[FusionPack],
                 continue
             e = max(0.0, paper_resid[i] - ACCUM_RESID_FLOOR)
             evidence[tid] = min(ACCUM_CLAMP, ACCUM_DECAY * evidence.get(tid, 0.0) + e)
+            if rot_nets[i] is not None:
+                re = max(0.0, rot_nets[i] - ROT_FLOOR)
+                rot_evidence[tid] = min(ACCUM_CLAMP, ACCUM_DECAY * rot_evidence.get(tid, 0.0) + re)
             seen.add(tid)
         for tid in list(evidence):
             if tid not in seen:
                 evidence[tid] *= ACCUM_DECAY
+        for tid in list(rot_evidence):
+            if tid not in seen:
+                rot_evidence[tid] *= ACCUM_DECAY
 
         # --- follow the incumbent identity (IoU assoc; re-bind on break) ---
         inc = next((t for t in tracks if t.tid == incumbent_tid), None)
@@ -1340,17 +1422,16 @@ def track_accum_identity(clip: str | Path, packs: list[FusionPack],
             if cands:
                 def _rebind_key(b: tuple) -> tuple[float, float]:
                     tid = _tid_for_box(tracks, b)
-                    ev = evidence.get(tid, 0.0) if tid is not None else 0.0
                     dist = math.hypot(_centroid(b)[0] - pred[0], _centroid(b)[1] - pred[1])
-                    return (ev, -dist)
+                    return (total_ev(tid), -dist)
                 box = max(cands, key=_rebind_key)
                 incumbent_tid = _tid_for_box(tracks, box)
                 inc = next((t for t in tracks if t.tid == incumbent_tid), None)
                 switch_streak = 0
 
         # --- hysteresis switch to a higher-evidence challenger ---
-        inc_ev = evidence.get(incumbent_tid, 0.0) if incumbent_tid is not None else -1.0
-        challengers = [(t.tid, evidence.get(t.tid, 0.0)) for t in tracks if t.tid != incumbent_tid]
+        inc_ev = total_ev(incumbent_tid)
+        challengers = [(t.tid, total_ev(t.tid)) for t in tracks if t.tid != incumbent_tid]
         if challengers:
             ch_tid, ch_ev = max(challengers, key=lambda kv: kv[1])
             if ch_ev - inc_ev >= ACCUM_SWITCH_MARGIN:
