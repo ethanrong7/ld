@@ -20,8 +20,10 @@ import argparse
 from pathlib import Path
 
 from ld.config import DETECT_DATASET_DIR, DETECT_RUNS_DIR
+from ld.capture.video_source import VideoSource, open_writer
+from ld.vision.cursor import strip_pointer
 
-__all__ = ["infer"]
+__all__ = ["infer", "infer_clip"]
 
 
 def infer(weights: Path, source: Path, conf: float = 0.25,
@@ -48,6 +50,58 @@ def infer(weights: Path, source: Path, conf: float = 0.25,
     return out_dir
 
 
+def infer_clip(weights: Path, clip: Path, *, conf: float = 0.25,
+               imgsz: int = 768, name: str = "yolov8n_clip",
+               strip_green: bool = True) -> Path:
+    """Run YOLO on every frame of a clip and write a box overlay mp4."""
+    import statistics
+
+    import cv2
+    from ultralytics import YOLO
+
+    weights = Path(weights)
+    clip = Path(clip)
+    if not weights.exists():
+        raise SystemExit(f"No weights at {weights}")
+    if not clip.exists():
+        raise SystemExit(f"No clip at {clip}")
+
+    yolo = YOLO(str(weights))
+    out = DETECT_RUNS_DIR / f"{clip.stem}_{name}.mp4"
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    src = VideoSource(clip)
+    writer = open_writer(out, src.meta.width, src.meta.height, src.meta.fps or 30.0)
+    counts: list[int] = []
+    for _idx, raw in src.frames():
+        frame = strip_pointer(raw, strip_green=strip_green)
+        res = yolo.predict(frame, conf=conf, imgsz=imgsz, verbose=False)[0]
+        n = 0
+        if res.boxes is not None and len(res.boxes):
+            n = len(res.boxes)
+            xyxy = res.boxes.xyxy.cpu().numpy()
+            cfs = res.boxes.conf.cpu().numpy()
+            for box, cf in zip(xyxy, cfs):
+                x1, y1, x2, y2 = (int(v) for v in box)
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                cv2.putText(frame, f"{cf:.2f}", (x1, max(12, y1 - 4)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
+        counts.append(n)
+        hud = f"f{_idx} dets={n}"
+        cv2.rectangle(frame, (0, 0), (frame.shape[1], 22), (0, 0, 0), -1)
+        cv2.putText(frame, hud, (6, 16), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        writer.write(frame)
+
+    writer.release()
+    src.release()
+    if counts:
+        print(f"frames={len(counts)} boxes/frame: "
+              f"min={min(counts)} median={int(statistics.median(counts))} "
+              f"max={max(counts)} mean={statistics.mean(counts):.1f}")
+    print(f"overlay -> {out}")
+    return out
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Run YOLOv8n on held-out frames")
     ap.add_argument("--weights", required=True)
@@ -56,8 +110,13 @@ def main() -> None:
     ap.add_argument("--conf", type=float, default=0.25)
     ap.add_argument("--imgsz", type=int, default=768)
     ap.add_argument("--name", default="yolov8n_infer")
+    ap.add_argument("--clip", default=None, help="mp4 clip for frame-by-frame overlay video")
     args = ap.parse_args()
-    infer(Path(args.weights), Path(args.source), args.conf, args.imgsz, args.name)
+    if args.clip:
+        infer_clip(Path(args.weights), Path(args.clip), conf=args.conf,
+                   imgsz=args.imgsz, name=args.name)
+    else:
+        infer(Path(args.weights), Path(args.source), args.conf, args.imgsz, args.name)
 
 
 if __name__ == "__main__":
