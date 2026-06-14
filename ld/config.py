@@ -8,6 +8,18 @@ ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "data"
 OUTPUT_DIR = ROOT / "output"
 
+# --- Detector validation tooling (ld/detect) -------------------------------
+# Workspace for the YOLO-path viability test. All gitignored (under data/).
+DETECT_DIR = DATA_DIR / "detect"
+DETECT_FRAMES_DIR = DETECT_DIR / "frames"   # sampled, cursor-stripped PNGs
+DETECT_LABELS_DIR = DETECT_DIR / "labels"   # YOLO .txt labels (one per frame)
+DETECT_MANIFEST = DETECT_DIR / "manifest.json"
+DETECT_DATASET_DIR = DETECT_DIR / "dataset"  # YOLO train/val tree + dataset.yaml
+DETECT_RUNS_DIR = DETECT_DIR / "runs"        # ultralytics run outputs
+# Real-shape prefill box = GT crosshair centre, side = 2 * radius * this factor.
+DETECT_PREFILL_BOX_SCALE = 2.0
+DETECT_CLASS_NAMES = ["shape"]               # single class: "is a shape"
+
 # --- Green cursor (ground-truth answer marker, HSV) ------------------------
 # Bright pure-green crosshair (~0,255,0 in BGR). Used ONLY as GT for
 # evaluation on the t*-clips; never as a tracking input.

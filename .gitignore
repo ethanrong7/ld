@@ -24,6 +24,19 @@ data/*.mp4
 data/*.mkv
 data/sample/
 
+# Detector tooling: heavy/derived artifacts stay local; keep the hand-made
+# labels + manifest (frames are reproducible from the mp4s via sample_frames).
+data/detect/frames/
+data/detect/dataset/
+data/detect/runs/
+data/detect/cache/
+data/detect/evidence/
+data/detect/_*.png
+# Ultralytics writes these to the cwd on first train/predict.
+/yolov8n.pt
+*.pt
+/Ultralytics/
+
 # OS
 .DS_Store
 Thumbs.db

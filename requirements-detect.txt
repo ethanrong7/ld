@@ -1,0 +1,3 @@
+# Detector-path viability test (ld/detect). Heavy (pulls torch); install into a
+# dedicated venv, kept separate from the lean runtime requirements.txt.
+ultralytics>=8.2.0
