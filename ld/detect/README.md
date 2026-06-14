@@ -1,7 +1,17 @@
 # Detector path (`ld/detect`)
 
 YOLO-based detection + identity tracking for Lie Detector clips. YOLO boxes every
-shape; `identity` picks which box is the real one using paper-motion residuals.
+shape; `identity` picks which box is the real one.
+
+**Default mode: `field`** (the leader). The real shape's identity fragments across
+frames (it moves independently amid dense identical neighbours, so a single tracklet
+holds it only ~22% of the time — see `DIAGNOSIS.md`), which defeats per-tracklet
+approaches. `field` is identity-free: it accumulates independent-motion saliency
+*spatially* (`ld/vision/motion.py`) and snaps to the YOLO box with the most saliency
+inside it. On the `t1–t10` eval set it reaches mean `within_r` **0.71** (honest
+leave-one-out **0.69**, `ld/detect/loo.py`), vs 0.49 for the per-tracklet `accum`
+mode and 0.35 for the best per-frame baseline. Full ranking: `ld/detect/LEADERBOARD.md`.
+Compare modes with `python -m ld.detect.eval_modes`.
 
 ## Clone and get working
 

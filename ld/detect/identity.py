@@ -1729,7 +1729,7 @@ def _dispatch_mode(clip: Path, packs: list[FusionPack], lock: LockInfo | None,
 
 def run_clip(weights: str | Path, clip: str | Path, *, conf: float = 0.25,
              imgsz: int = 768, use_cache: bool = True, evidence: bool = False,
-             mode: str = "paper") -> IdentityReport:
+             mode: str = "field") -> IdentityReport:
     clip = Path(clip)
     name = clip.stem.replace("_cropped_trimmed", "")
     packs = detect_fusion_clip(weights, clip, conf=conf, imgsz=imgsz, use_cache=use_cache)
@@ -1762,13 +1762,11 @@ def main() -> None:
     ap.add_argument("--evidence", action="store_true")
     ap.add_argument("--mode",
                     choices=ALL_MODES,
-                    default="paper",
-                    help="paper=default; paper_outlier_rank=switch on low residual rank; "
-                         "paper_outlier=paper + coast outlier switch; "
-                         "outlier=persistent outlier tracks; "
-                         "trajectory=Viterbi graph; trajectory_paper=gated blend; "
-                         "hypothesis_paper=multi-hyp + gated paper; "
-                         "hypothesis=multi-hyp only; hybrid=paper+chain; chain=IoU")
+                    default="field",
+                    help="field=default, leader (position-field saliency + YOLO snap); "
+                         "accum=causal per-tracklet evidence + rotation; "
+                         "paper_outlier_rank/paper/etc=older per-frame baselines; "
+                         "see ld/detect/LEADERBOARD.md for the full ranking")
     args = ap.parse_args()
 
     inputs = [Path(p) for p in args.inputs] if args.inputs else _default_inputs()
