@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import argparse
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 import cv2
@@ -60,20 +60,7 @@ COAST_PATIENCE = 15
 PAPER_RESID_EMA = 0.45      # temporal smooth; lower = more responsive
 PAPER_RESID_BLEND = 0.65    # weight on EMA when frame is ambiguous (instant top-2 close)
 PAPER_RESID_AMBIG = 1.2     # px; apply EMA blend only if top-2 instant residuals within this
-HYBRID_CHAIN_IOU_MIN = 0.30 # prefer IoU chain over paper when signals disagree
-PAPER_FREE_IOU_W = 0.25     # continuity to prev box only; no pred proximity gate
 PAPER_PROX_W = 0.30         # weight on pred proximity in default paper pick
-PAPER_REACQ_LOST = 5        # global paper pick after this many coast frames
-HYP_K = 5
-HYP_WINDOW = 25
-HYP_SCORE_EMA = 0.40          # per-hypothesis residual smooth
-GRAPH_WINDOW = 30               # Viterbi lookback (frames)
-GRAPH_IOU_W = 0.35              # continuity bonus on graph edges (light)
-GRAPH_DIST_W = 0.15             # weak edge when centroid within gate but IoU low
-GRAPH_LOCK_BONUS = 3.0          # seed path at countdown lock box
-GRAPH_DECAY = 0.94              # recent frames weigh more in path score
-GRAPH_SWITCH_MARGIN = 2.0       # trajectory wins over paper only above this gap
-TRAJ_REACQ_LOST = 3             # coast frames before Viterbi re-acquire
 PAPER_INLIER_MAX = 2.5   # px; fake boxes used to refine sheet fit
 # Causal accumulating-evidence tracker (mode "accum"). The real shape is the
 # persistent motion outlier; integrate per-tracklet residual over time and only
@@ -100,24 +87,6 @@ WHITE_TELEPORT_PX = 80.0 # START-text false positive jumps farther than this
 RIGID_RANSAC_THRESH = 3.0
 IOU_MATCH_MIN = 0.15
 TRACK_MISS_MAX = 8
-
-
-@dataclass
-class Hypothesis:
-    """One candidate real-shape track accumulated over time."""
-
-    box: tuple[float, float, float, float, float]
-    score_ema: float = 0.0
-    window: list[float] = field(default_factory=list)
-    misses: int = 0
-
-
-@dataclass
-class GraphFrame:
-    """One frame in the trajectory-graph buffer."""
-
-    boxes: list[tuple[float, float, float, float, float]]
-    resid: list[float]
 
 
 @dataclass
@@ -401,358 +370,6 @@ def _pick_paper_outlier_box(boxes: list[tuple], prev_box: tuple | None,
     if best_box is not None:
         return best_box
     return max(boxes, key=lambda b: _iou(b, prev_box))
-
-
-def _paper_resid_margin(resid: list[float]) -> float:
-    ranked = sorted(resid, reverse=True)
-    if len(ranked) < 2:
-        return ranked[0] if ranked else 0.0
-    return ranked[0] - ranked[1]
-
-
-def _hypothesis_score(h: Hypothesis) -> float:
-    """Rolling paper-residual sum + EMA; penalize stale tracks."""
-    return sum(h.window[-HYP_WINDOW:]) + 0.4 * h.score_ema - 0.15 * h.misses
-
-
-def _hypothesis_claimed(hyps: list[Hypothesis], box: tuple) -> bool:
-    return any(_iou(h.box, box) >= IOU_MATCH_MIN for h in hyps)
-
-
-def _init_hypotheses(boxes: list[tuple], resid: list[float],
-                     seed_box: tuple | None) -> list[Hypothesis]:
-    hyps: list[Hypothesis] = []
-    if seed_box is not None:
-        hyps.append(Hypothesis(seed_box))
-    order = sorted(range(len(boxes)), key=lambda i: resid[i], reverse=True)
-    for i in order:
-        if len(hyps) >= HYP_K:
-            break
-        if _hypothesis_claimed(hyps, boxes[i]):
-            continue
-        hyps.append(Hypothesis(boxes[i], score_ema=resid[i], window=[resid[i]]))
-    return hyps
-
-
-def _update_hypotheses(hyps: list[Hypothesis], boxes: list[tuple],
-                       resid: list[float],
-                       seed_box: tuple | None) -> tuple[tuple | None, list[Hypothesis]]:
-    """Propagate top-K box tracks; pick the highest cumulative paper-residual score."""
-    if not boxes:
-        for h in hyps:
-            h.misses += 1
-        hyps = [h for h in hyps if h.misses <= TRACK_MISS_MAX]
-        if not hyps:
-            return None, hyps
-        best = max(hyps, key=_hypothesis_score)
-        return best.box, hyps
-
-    if not hyps:
-        hyps = _init_hypotheses(boxes, resid, seed_box)
-        if not hyps:
-            return None, hyps
-        return max(hyps, key=_hypothesis_score).box, hyps
-
-    pairs: list[tuple[float, int, int]] = []
-    for hi, h in enumerate(hyps):
-        for bi, box in enumerate(boxes):
-            v = _iou(h.box, box)
-            if v >= IOU_MATCH_MIN:
-                pairs.append((v, hi, bi))
-    pairs.sort(reverse=True)
-
-    used_h: set[int] = set()
-    used_b: set[int] = set()
-    for _, hi, bi in pairs:
-        if hi in used_h or bi in used_b:
-            continue
-        h = hyps[hi]
-        r = resid[bi]
-        h.box = boxes[bi]
-        h.misses = 0
-        h.score_ema = HYP_SCORE_EMA * h.score_ema + (1.0 - HYP_SCORE_EMA) * r
-        h.window.append(r)
-        if len(h.window) > HYP_WINDOW:
-            h.window.pop(0)
-        used_h.add(hi)
-        used_b.add(bi)
-
-    for hi, h in enumerate(hyps):
-        if hi not in used_h:
-            h.misses += 1
-
-    hyps = [h for h in hyps if h.misses <= TRACK_MISS_MAX]
-
-    order = sorted(range(len(boxes)), key=lambda i: resid[i], reverse=True)
-    for i in order:
-        if len(hyps) >= HYP_K:
-            break
-        if i in used_b or _hypothesis_claimed(hyps, boxes[i]):
-            continue
-        hyps.append(Hypothesis(boxes[i], score_ema=resid[i], window=[resid[i]]))
-
-    if not hyps:
-        return None, hyps
-    return max(hyps, key=_hypothesis_score).box, hyps
-
-
-def _pick_hypothesis_paper_box(hyps: list[Hypothesis], boxes: list[tuple],
-                               prev_box: tuple | None, pred: np.ndarray,
-                               gate: float, resid_pick: list[float],
-                               seed_box: tuple | None
-                               ) -> tuple[tuple | None, list[Hypothesis]]:
-    """Hypothesis on disagreement only when trajectory score has clear margin."""
-    hyp_box, hyps = _update_hypotheses(hyps, boxes, resid_pick, seed_box)
-    paper_box = _pick_paper_outlier_box(boxes, prev_box, pred, gate, resid_pick)
-    if hyp_box is None:
-        return paper_box, hyps
-    if paper_box is None:
-        return hyp_box, hyps
-    if _iou(hyp_box, paper_box) >= IOU_MATCH_MIN:
-        return paper_box, hyps
-    ranked = sorted(hyps, key=_hypothesis_score, reverse=True)
-    if (len(ranked) >= 2
-            and _hypothesis_score(ranked[0]) - _hypothesis_score(ranked[1]) >= 1.5):
-        return ranked[0].box, hyps
-    return paper_box, hyps
-
-
-def _graph_edge_bonus(prev_box: tuple, curr_box: tuple, gate: float) -> float | None:
-    """IoU-linked edge weight, or a weak centroid link when motion is fast."""
-    iou = _iou(prev_box, curr_box)
-    if iou >= IOU_MATCH_MIN:
-        return GRAPH_IOU_W * iou
-    cx1, cy1 = _centroid(prev_box)
-    cx2, cy2 = _centroid(curr_box)
-    dist = float(np.hypot(cx2 - cx1, cy2 - cy1))
-    if dist <= gate:
-        return GRAPH_DIST_W * (1.0 - min(dist / gate, 1.0))
-    return None
-
-
-def _neg_inf() -> float:
-    return -1e9
-
-
-def _viterbi_trajectory_path(history: list[GraphFrame], *, gate: float,
-                             lock_box: tuple | None = None
-                             ) -> tuple[list[int], float, list[float]]:
-    """Best box-index path, its score, and all end-state scores at the last frame."""
-    w = len(history)
-    if w == 0:
-        return [], _neg_inf(), []
-    if not history[-1].boxes:
-        return [], _neg_inf(), []
-
-    neg = -1e9
-    scores: list[list[float]] = []
-    back: list[list[int]] = []
-
-    n0 = len(history[0].boxes)
-    if n0 == 0:
-        return [], neg, []
-    decay = [GRAPH_DECAY ** (w - 1 - f) for f in range(w)]
-    s0 = [neg] * n0
-    for i, r in enumerate(history[0].resid):
-        s0[i] = decay[0] * r
-        if lock_box is not None and _iou(history[0].boxes[i], lock_box) >= IOU_MATCH_MIN:
-            s0[i] += GRAPH_LOCK_BONUS
-    scores.append(s0)
-    back.append([-1] * n0)
-
-    for f in range(1, w):
-        prev = history[f - 1]
-        curr = history[f]
-        nf = len(curr.boxes)
-        sf = [neg] * max(nf, 1)
-        bf = [-1] * max(nf, 1)
-        if nf == 0 or not prev.boxes:
-            scores.append(sf)
-            back.append(bf)
-            continue
-        for j in range(nf):
-            best_s, best_i = neg, -1
-            for i, pb in enumerate(prev.boxes):
-                if scores[f - 1][i] <= neg / 2:
-                    continue
-                edge = _graph_edge_bonus(pb, curr.boxes[j], gate)
-                if edge is None:
-                    continue
-                cand = scores[f - 1][i] + decay[f] * curr.resid[j] + edge
-                if cand > best_s:
-                    best_s, best_i = cand, i
-            sf[j] = best_s
-            bf[j] = best_i
-        scores.append(sf)
-        back.append(bf)
-
-    last_f = w - 1
-    end_scores = list(scores[last_f])
-    if not history[last_f].boxes:
-        return [], neg, end_scores
-    end_i = max(range(len(history[last_f].boxes)), key=lambda i: scores[last_f][i])
-    if scores[last_f][end_i] <= neg / 2:
-        end_i = max(range(len(history[last_f].boxes)),
-                    key=lambda i: history[last_f].resid[i])
-    best_score = scores[last_f][end_i]
-
-    path = [0] * w
-    path[last_f] = end_i
-    for f in range(last_f - 1, -1, -1):
-        nxt = path[f + 1]
-        if nxt < len(back[f + 1]) and back[f + 1][nxt] >= 0:
-            path[f] = back[f + 1][nxt]
-        elif history[f].boxes:
-            path[f] = max(range(len(history[f].boxes)), key=lambda i: history[f].resid[i])
-    return path, best_score, end_scores
-
-
-def _trajectory_path_scores(history: list[GraphFrame], *, gate: float,
-                            lock_box: tuple | None = None) -> tuple[list[int], float, float]:
-    """Return (path, best_score, second_best_score) at the newest frame."""
-    path, best, end_scores = _viterbi_trajectory_path(history, gate=gate, lock_box=lock_box)
-    if not end_scores:
-        return path, best, _neg_inf()
-    ranked = sorted(end_scores, reverse=True)
-    second = ranked[1] if len(ranked) >= 2 else ranked[0]
-    return path, best, second
-
-
-def _pick_trajectory_graph(history: list[GraphFrame], *, gate: float,
-                           lock_box: tuple | None = None) -> tuple | None:
-    """Pick the box at the newest buffered frame from the best Viterbi path."""
-    if not history or not history[-1].boxes:
-        return None
-    path, _, _ = _viterbi_trajectory_path(history, gate=gate, lock_box=lock_box)
-    if not path:
-        return history[-1].boxes[max(range(len(history[-1].resid)),
-                                     key=lambda i: history[-1].resid[i])]
-    idx = path[-1]
-    if 0 <= idx < len(history[-1].boxes):
-        return history[-1].boxes[idx]
-    return history[-1].boxes[max(range(len(history[-1].resid)),
-                                 key=lambda i: history[-1].resid[i])]
-
-
-def _pick_trajectory_paper_box(history: list[GraphFrame], boxes: list[tuple],
-                               prev_box: tuple | None, pred: np.ndarray,
-                               gate: float, resid_pick: list[float],
-                               lock_box: tuple | None) -> tuple | None:
-    """Trajectory when it disagrees with paper and has a clear path margin."""
-    traj = _pick_trajectory_graph(history, gate=gate, lock_box=lock_box)
-    paper = _pick_paper_outlier_box(boxes, prev_box, pred, gate, resid_pick)
-    if traj is None:
-        return paper
-    if paper is None:
-        return traj
-    if _iou(traj, paper) >= IOU_MATCH_MIN:
-        return paper
-    _, best, second = _trajectory_path_scores(history, gate=gate, lock_box=lock_box)
-    if best - second >= GRAPH_SWITCH_MARGIN:
-        return traj
-    return paper
-
-
-def _pick_trajectory_reacq_box(history: list[GraphFrame], boxes: list[tuple],
-                               prev_box: tuple | None, pred: np.ndarray,
-                               gate: float, resid_pick: list[float],
-                               lock_box: tuple | None, *, lost: int) -> tuple | None:
-    """Paper pick by default; Viterbi re-acquire after sustained coast."""
-    if lost >= TRAJ_REACQ_LOST and history:
-        chosen = _pick_trajectory_graph(history, gate=gate, lock_box=lock_box)
-        if chosen is not None:
-            return chosen
-    return _pick_paper_outlier_box(boxes, prev_box, pred, gate, resid_pick)
-
-
-def _pick_paper_reacq_box(boxes: list[tuple], prev_box: tuple | None,
-                          pred: np.ndarray, gate: float,
-                          paper_resid: list[float], *, lost: int) -> tuple | None:
-    """Default gated paper pick; global re-acquire when margin clear or coasting."""
-    margin = _paper_resid_margin(paper_resid)
-    if (prev_box is None or lost >= PAPER_REACQ_LOST
-            or margin >= PAPER_RESID_AMBIG):
-        if boxes:
-            return boxes[max(range(len(boxes)), key=lambda i: paper_resid[i])]
-        return None
-    return _pick_paper_outlier_box(boxes, prev_box, pred, gate, paper_resid)
-
-
-def _pick_paper_free_box(boxes: list[tuple], prev_box: tuple | None,
-                         paper_resid: list[float]) -> tuple | None:
-    """Paper residual pick without pred gate/proximity; re-acquire on clear margin."""
-    if not boxes:
-        return None
-    margin = _paper_resid_margin(paper_resid)
-    reacquire = prev_box is None or margin >= PAPER_RESID_AMBIG
-    if not reacquire and prev_box is not None:
-        if max(_iou(b, prev_box) for b in boxes) < IOU_MATCH_MIN:
-            reacquire = True
-        else:
-            prev_i = max(range(len(boxes)), key=lambda i: _iou(boxes[i], prev_box))
-            if paper_resid[prev_i] < max(paper_resid) - margin:
-                reacquire = margin >= PAPER_RESID_AMBIG * 0.5
-    if reacquire:
-        return boxes[max(range(len(boxes)), key=lambda i: paper_resid[i])]
-
-    best_box: tuple | None = None
-    best_score = -1e9
-    for i, box in enumerate(boxes):
-        score = paper_resid[i] + PAPER_FREE_IOU_W * _iou(box, prev_box)
-        if score > best_score:
-            best_score, best_box = score, box
-    return best_box
-
-
-def _pick_hybrid_unified(boxes: list[tuple], prev_box: tuple | None,
-                         pred: np.ndarray, gate: float,
-                         paper_resid: list[float],
-                         rigid_resid: list[float] | None) -> tuple | None:
-    """Fused paper + IoU chain score every frame."""
-    if not boxes:
-        return None
-    if prev_box is None:
-        return boxes[max(range(len(boxes)), key=lambda i: paper_resid[i])]
-    best_box, best_score = None, -1e9
-    for i, box in enumerate(boxes):
-        iou = _iou(box, prev_box)
-        cx, cy = _centroid(box)
-        dist = float(np.hypot(cx - pred[0], cy - pred[1]))
-        if dist > gate and iou < IOU_MATCH_MIN:
-            continue
-        prox = 1.0 - min(dist / gate, 1.0)
-        chain = iou * 4.0 + 0.4 * prox
-        rigid = rigid_resid[i] if rigid_resid and i < len(rigid_resid) else 0.0
-        score = paper_resid[i] + 0.45 * iou + 0.3 * prox + 0.3 * chain + 0.1 * rigid
-        if score > best_score:
-            best_score, best_box = score, box
-    if best_box is not None:
-        return best_box
-    return max(boxes, key=lambda b: _iou(b, prev_box))
-
-
-def _pick_hybrid_box(boxes: list[tuple], prev_box: tuple | None,
-                     pred: np.ndarray, gate: float,
-                     paper_resid: list[float],
-                     rigid_resid: list[float] | None) -> tuple | None:
-    """Paper outlier + IoU chain: chain wins on disagreement when continuity is strong."""
-    if not boxes:
-        return None
-    paper = _pick_paper_outlier_box(boxes, prev_box, pred, gate, paper_resid)
-    if prev_box is None:
-        return paper
-    chain = _chain_locked_box(boxes, prev_box, pred, gate, rigid_resid)
-    if paper is None:
-        return chain
-    if chain is None:
-        return paper
-    if _iou(paper, chain) >= IOU_MATCH_MIN:
-        return paper
-    ranked = sorted(paper_resid, reverse=True)
-    margin = ranked[0] - ranked[1] if len(ranked) >= 2 else ranked[0]
-    if _iou(chain, prev_box) >= HYBRID_CHAIN_IOU_MIN and margin < PAPER_RESID_AMBIG:
-        return chain
-    return paper
 
 
 def _chain_locked_box(boxes: list[tuple], prev_box: tuple | None,
@@ -1059,8 +676,6 @@ def track_paper_identity(clip: str | Path, packs: list[FusionPack],
     prev_boxes: list[tuple] = []
     paper_resid_ema: list[float] | None = None
     prev_gray: np.ndarray | None = None
-    hypotheses: list[Hypothesis] = []
-    graph_history: list[GraphFrame] = []
     ol_tracks: list = []
     ol_next_tid = 0
     ol_lock_tid: int | None = None
@@ -1099,14 +714,6 @@ def track_paper_identity(clip: str | Path, packs: list[FusionPack],
                 prev_locked_box = tracks[0].box
                 pos = np.array([tracks[0].cx, tracks[0].cy], np.float32)
                 vel[:] = 0.0
-            if pick_mode in ("hypothesis",) and prev_locked_box is not None:
-                hypotheses = [Hypothesis(prev_locked_box)]
-            if pick_mode in ("trajectory", "trajectory_paper", "trajectory_reacq") and prev_locked_box is not None and p.boxes:
-                n = len(p.boxes)
-                resid_seed = [0.0] * n
-                lock_i = max(range(n), key=lambda i: _iou(p.boxes[i], prev_locked_box))
-                resid_seed[lock_i] = GRAPH_LOCK_BONUS
-                graph_history = [GraphFrame(list(p.boxes), resid_seed)]
             if pick_mode in ("paper_outlier", "paper_outlier_rank") and lock is not None and p.boxes:
                 from ld.detect.outlier_track import init_outlier_tracks
                 ol_tracks, ol_next_tid, ol_lock_tid = init_outlier_tracks(p.boxes, lock)
@@ -1134,45 +741,7 @@ def track_paper_identity(clip: str | Path, packs: list[FusionPack],
             chain_prev = lock.box
 
         resid_pick = _resid_for_pick(paper_resid, paper_resid_ema, use_ema=p.idx >= start)
-        rigid = _box_rigid_residuals(prev_boxes, p.boxes) if prev_boxes else None
-        if pick_mode == "trajectory":
-            graph_history.append(GraphFrame(list(p.boxes), list(resid_pick)))
-            if len(graph_history) > GRAPH_WINDOW:
-                graph_history.pop(0)
-            lock_seed = lock.box if lock is not None and p.idx - lock_frame <= GRAPH_WINDOW else None
-            chosen = _pick_trajectory_graph(graph_history, gate=gate, lock_box=lock_seed)
-        elif pick_mode == "trajectory_paper":
-            graph_history.append(GraphFrame(list(p.boxes), list(resid_pick)))
-            if len(graph_history) > GRAPH_WINDOW:
-                graph_history.pop(0)
-            lock_seed = lock.box if lock is not None and p.idx - lock_frame <= GRAPH_WINDOW else None
-            chosen = _pick_trajectory_paper_box(
-                graph_history, p.boxes, chain_prev, pred, gate, resid_pick, lock_seed)
-        elif pick_mode == "trajectory_reacq":
-            graph_history.append(GraphFrame(list(p.boxes), list(resid_pick)))
-            if len(graph_history) > GRAPH_WINDOW:
-                graph_history.pop(0)
-            lock_seed = lock.box if lock is not None and p.idx - lock_frame <= GRAPH_WINDOW else None
-            chosen = _pick_trajectory_reacq_box(
-                graph_history, p.boxes, chain_prev, pred, gate, resid_pick, lock_seed, lost=lost)
-        elif pick_mode == "hypothesis":
-            seed = lock.box if lock is not None and p.idx - lock_frame <= 2 else None
-            chosen, hypotheses = _update_hypotheses(
-                hypotheses, p.boxes, resid_pick, seed)
-        elif pick_mode == "hypothesis_paper":
-            seed = lock.box if lock is not None and p.idx - lock_frame <= 2 else None
-            chosen, hypotheses = _pick_hypothesis_paper_box(
-                hypotheses, p.boxes, chain_prev, pred, gate, resid_pick, seed)
-        elif pick_mode == "hybrid_unified":
-            chosen = _pick_hybrid_unified(p.boxes, chain_prev, pred, gate, resid_pick, rigid)
-        elif pick_mode == "hybrid":
-            chosen = _pick_hybrid_box(p.boxes, chain_prev, pred, gate, resid_pick, rigid)
-        elif pick_mode == "paper_free":
-            chosen = _pick_paper_free_box(p.boxes, chain_prev, resid_pick)
-        elif pick_mode == "paper_reacq":
-            chosen = _pick_paper_reacq_box(
-                p.boxes, chain_prev, pred, gate, resid_pick, lost=lost)
-        elif pick_mode == "paper_outlier":
+        if pick_mode == "paper_outlier":
             from ld.detect.outlier_track import advance_outlier_tracks, outlier_switch_box
             assoc_gate = max(gate, 1.3 * radius * 1.15)
             ol_tracks, ol_next_tid = advance_outlier_tracks(
@@ -1697,9 +1266,7 @@ def _render_evidence(clip: Path, packs: list[FusionPack], track: list[TrackPoint
 # Modes routed through track_paper_identity (pick_mode == mode). Everything else
 # is dispatched specially in _dispatch_mode (outlier tracker, or chain fallback).
 _PAPER_PICK_MODES = (
-    "paper", "hypothesis", "hypothesis_paper", "hybrid", "hybrid_unified",
-    "paper_free", "paper_reacq", "trajectory", "trajectory_paper",
-    "trajectory_reacq", "paper_outlier", "paper_outlier_rank",
+    "paper", "paper_outlier", "paper_outlier_rank",
 )
 
 # All selectable modes, in leaderboard order. Single source of truth shared by
