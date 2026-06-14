@@ -38,13 +38,45 @@ shape radius ~50–60px). Closing the gap to "inside the shape every frame"
 is the next phase (outlier-tracklet linking, a particle filter, and fusing
 the independent-rotation cue for non-circular shapes).
 
+## Getting started
+
+```bash
+git clone <repo-url> ld && cd ld
+
+python3.12 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+export PYTHONPATH=.    # Windows: $env:PYTHONPATH = "."
+```
+
+Eval clips are **not** in git. Place your own `data/t*_cropped_trimmed.mp4` files
+locally before running any command that reads video.
+
+For the YOLO detector + identity tracker (trained weights, bbox overlay videos),
+also install `requirements-detect.txt` and follow
+[`ld/detect/README.md`](ld/detect/README.md).
+
+### Quick example: bbox overlay on `t1`
+
+After training (or copying weights to `data/detect/runs/yolov8n_combined/weights/best.pt`):
+
+```bash
+# Every detected shape boxed (green rectangles + confidence)
+.venv/bin/python -m ld.detect.infer \
+  --weights data/detect/runs/yolov8n_combined/weights/best.pt \
+  --clip data/t1_cropped_trimmed.mp4
+
+# Real shape highlighted + track overlay
+.venv/bin/python -m ld.detect.identity \
+  --weights data/detect/runs/yolov8n_combined/weights/best.pt \
+  --inputs data/t1_cropped_trimmed.mp4 --evidence
+```
+
+Videos land in `data/detect/runs/` and `data/detect/evidence/` respectively.
+
 ## Pointer stripping
 
-Kept from the earlier work and used on every frame before processing —
-inpainting the green GT crosshair (and optionally a live mouse disk) so the
-solver never sees a moving cursor beacon.
-
-## Pointer stripping
+Used on every frame before processing — inpainting the green GT crosshair (and
+optionally a live mouse disk) so the solver never sees a moving cursor beacon.
 
 `ld/vision/cursor.py`:
 
@@ -54,16 +86,6 @@ solver never sees a moving cursor beacon.
 
 Tunables in `ld/config.py`: `GREEN_*`, `POINTER_INPAINT_RADIUS`, `POINTER_RADIUS`.
 
-## Setup
-
-```bash
-python -m venv .venv
-.venv\Scripts\pip install -r requirements.txt
-set PYTHONPATH=.
-```
-
-Clips live in `data/` (gitignored). Test clips: `data/t*_cropped_trimmed.mp4`.
-
 ## Modules
 
 - `ld/vision/motion.py` — rigid sheet-motion + independent-motion saliency
@@ -72,6 +94,7 @@ Clips live in `data/` (gitignored). Test clips: `data/t*_cropped_trimmed.mp4`.
 - `ld/solve.py` — acquisition + tracking pipeline (per-frame track)
 - `ld/eval/score.py` — accuracy vs the green GT (evaluation only)
 - `ld/debug/evidence.py` — overlay video explaining the signal
+- `ld/detect/` — YOLO detection + identity tracking (see `ld/detect/README.md`)
 
 Tunables live in `ld/config.py` (`FEAT_*`, `OUTLIER_*`, `SALIENCY_*`, gate /
 velocity / re-acquire settings, `WHITE_*` acquisition, `GREEN_*` GT).
