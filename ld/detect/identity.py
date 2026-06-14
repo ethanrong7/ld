@@ -1475,6 +1475,90 @@ def track_accum_identity(clip: str | Path, packs: list[FusionPack],
     return track, locked_hist, start, radius
 
 
+FIELD_SNAP_FRAC = 1.0   # snap field output to nearest YOLO box within this x gate
+
+
+def track_field_identity(clip: str | Path, packs: list[FusionPack],
+                         lock: LockInfo | None = None, *,
+                         gate_radius: float | None = None,
+                         frame_wh: tuple[int, int] | None = None,
+                         yolo_snap: bool = True
+                         ) -> tuple[list[TrackPoint], list[int | None], int, float]:
+    """Position-field tracker: identity-free, fragmentation-immune.
+
+    Independent-motion evidence is accumulated *spatially* (per-frame outlier
+    saliency from `motion.estimate_motion`, EMA-smoothed and gated by a
+    constant-velocity model in `OutlierTracker`) rather than per tracklet — so the
+    real shape's identity fragmenting across YOLO boxes (the diagnosed limiter)
+    cannot lose it. The tracked peak is optionally snapped to the nearest YOLO box
+    centroid each frame, fusing the healthy detector for precise localization.
+    """
+    from ld.track.tracker import OutlierTracker
+    from ld.vision.motion import estimate_motion, saliency_map
+
+    clip = Path(clip)
+    seed_x, seed_y, radius, start = _seed(packs)  # type: ignore[arg-type]
+    lock_frame = lock.frame if lock is not None else start
+    gate = gate_radius or max(GATE_RADIUS, 1.3 * radius)
+    snap_dist = FIELD_SNAP_FRAC * gate
+    pos = np.array([seed_x, seed_y], np.float32)
+    tracker: OutlierTracker | None = None
+    prev_gray: np.ndarray | None = None
+    fw, fh = frame_wh if frame_wh else (None, None)
+
+    track: list[TrackPoint] = []
+    locked_hist: list[int | None] = []
+
+    src = VideoSource(clip)
+    for idx, raw in src.frames():
+        if idx >= len(packs):
+            break
+        p = packs[idx]
+        gray = cv2.cvtColor(strip_pointer(raw, strip_green=True), cv2.COLOR_BGR2GRAY)
+
+        if p.idx < lock_frame or math.isnan(pos[0]):
+            track.append(TrackPoint(p.idx, float(pos[0]), float(pos[1]), "acquire", len(p.boxes)))
+            locked_hist.append(None)
+            if p.white is not None:
+                pos = np.array([p.white[0], p.white[1]], np.float32)
+            prev_gray = gray
+            continue
+
+        if p.idx == lock_frame and tracker is None:
+            cx, cy = (lock.cx, lock.cy) if lock is not None else (float(pos[0]), float(pos[1]))
+            pos = np.array([cx, cy], np.float32)
+            tracker = OutlierTracker(cx, cy, gate)
+            track.append(TrackPoint(p.idx, float(pos[0]), float(pos[1]), "acquire", len(p.boxes)))
+            locked_hist.append(None)
+            prev_gray = gray
+            continue
+
+        state = "coast"
+        x, y = float(pos[0]), float(pos[1])
+        if prev_gray is not None and tracker is not None:
+            field = estimate_motion(prev_gray, gray)
+            sal = saliency_map(field, gray.shape)
+            tp = tracker.update(p.idx, sal)
+            x, y, state = tp.x, tp.y, tp.state
+
+        if yolo_snap and p.boxes:
+            nb = min(p.boxes, key=lambda b: math.hypot(_centroid(b)[0] - x, _centroid(b)[1] - y))
+            ncx, ncy = _centroid(nb)
+            if math.hypot(ncx - x, ncy - y) <= snap_dist:
+                x, y = ncx, ncy
+
+        if fw is not None:
+            x = float(np.clip(x, 0, fw - 1))
+            y = float(np.clip(y, 0, fh - 1))
+        pos = np.array([x, y], np.float32)
+        track.append(TrackPoint(p.idx, x, y, state, len(p.boxes)))
+        locked_hist.append(None)
+        prev_gray = gray
+
+    src.release()
+    return track, locked_hist, start, radius
+
+
 def score_identity(packs: list[FusionPack], track: list[TrackPoint], start: int,
                    radius: float, clip_name: str) -> IdentityReport:
     gt = {p.idx: p.gt for p in packs if p.gt is not None}
@@ -1595,7 +1679,7 @@ _PAPER_PICK_MODES = (
 
 # All selectable modes, in leaderboard order. Single source of truth shared by
 # run_clip's argparse and the eval_modes harness so the two never drift.
-ALL_MODES = ("chain", *_PAPER_PICK_MODES, "outlier", "accum")
+ALL_MODES = ("chain", *_PAPER_PICK_MODES, "outlier", "accum", "field")
 
 
 def _dispatch_mode(clip: Path, packs: list[FusionPack], lock: LockInfo | None,
@@ -1610,6 +1694,8 @@ def _dispatch_mode(clip: Path, packs: list[FusionPack], lock: LockInfo | None,
         return track_paper_identity(clip, packs, lock, frame_wh=frame_wh, pick_mode=mode)
     if mode == "accum":
         return track_accum_identity(clip, packs, lock, frame_wh=frame_wh)
+    if mode == "field":
+        return track_field_identity(clip, packs, lock, frame_wh=frame_wh)
     if mode == "outlier":
         from ld.detect.outlier_track import track_outlier_identity
         return track_outlier_identity(clip, packs, lock, frame_wh=frame_wh)
