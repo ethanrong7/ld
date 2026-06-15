@@ -66,3 +66,13 @@ REACQUIRE_FRAC = 0.5         # gated peak must be >= this fraction of the global
                              # peak to be trusted; else the dominant cluster is
                              # outside the gate and we are likely off-track
 REACQUIRE_PATIENCE = 6       # frames off-track before jumping to the global peak
+
+# --- Fixed-lag confirmation smoother (mode "field_lag") --------------------
+# Defer committing a per-frame box pick until a short lookahead confirms it
+# continues the trajectory. ~10-15 frames is physically free (shape can't leave
+# its radius that fast; see CLAUDE.md "Latency budget"). The emitted frame is
+# t-LAG; the live position lags real time by LAG frames (legitimately online).
+FIELD_LAG_K = 8              # lookahead/lag frames; LOO-best over {8,12,15}
+FIELD_LAG_CONFIRM = 0.5      # frac of the K-window a candidate box must be the
+                             # field pick before committing; LOO-best over
+                             # {0.5,0.6,0.75}. Both selected by leave-one-out.

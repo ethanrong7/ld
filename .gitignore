@@ -41,3 +41,7 @@ data/detect/_*.png
 # OS
 .DS_Store
 Thumbs.db
+
+# Local-only: example media (large) + per-machine settings
+data/successful_examples/
+.claude/

@@ -33,6 +33,7 @@ import numpy as np
 
 from ld.capture.video_source import VideoSource, open_writer
 from ld.config import (DATA_DIR, DETECT_DIR, FEAT_MAX, FEAT_MIN_DIST, FEAT_QUALITY,
+                       FIELD_LAG_CONFIRM, FIELD_LAG_K,
                        GATE_RADIUS, LK_LEVELS, LK_WIN, RANSAC_THRESH,
                        WHITE_S_MAX, WHITE_V_MIN)
 from ld.detect.constellation import TrackPoint, _seed
@@ -1063,7 +1064,8 @@ def track_field_identity(clip: str | Path, packs: list[FusionPack],
                          yolo_snap: bool = True,
                          snap_frac: float = FIELD_SNAP_FRAC,
                          snap_mode: str = "mass",
-                         snap_feedback: bool = True
+                         snap_feedback: bool = True,
+                         chosen_centroids: list | None = None,
                          ) -> tuple[list[TrackPoint], list[int | None], int, float]:
     """Position-field tracker: identity-free, fragmentation-immune.
 
@@ -1140,6 +1142,190 @@ def track_field_identity(clip: str | Path, packs: list[FusionPack],
                 x, y = _centroid(chosen)
                 if snap_feedback and tracker is not None:
                     tracker.pos = np.array([x, y], np.float32)
+                if chosen_centroids is not None:
+                    chosen_centroids.append((p.idx, float(x), float(y)))
+            elif chosen_centroids is not None:
+                chosen_centroids.append((p.idx, None))
+
+        if fw is not None:
+            x = float(np.clip(x, 0, fw - 1))
+            y = float(np.clip(y, 0, fh - 1))
+
+        pos = np.array([x, y], np.float32)
+        track.append(TrackPoint(p.idx, x, y, state, len(p.boxes)))
+        locked_hist.append(None)
+        prev_gray = gray
+
+    src.release()
+    return track, locked_hist, start, radius
+
+
+def track_field_lag_identity(clip: str | Path, packs: list[FusionPack],
+                             lock: LockInfo | None = None, *,
+                             gate_radius: float | None = None,
+                             frame_wh: tuple[int, int] | None = None,
+                             lag_k: int = FIELD_LAG_K,
+                             confirm: float = FIELD_LAG_CONFIRM,
+                             ) -> tuple[list[TrackPoint], list[int | None], int, float]:
+    """Fixed-lag confirmation over field's box-pick sequence.
+
+    Defers committing a pick until `lag_k` future frames confirm the same box is
+    field's choice in >= `confirm` fraction of the window. Overrules transient
+    single-frame creep onto an adjacent fake before it poisons the CV velocity and
+    locks in (the diagnosed failure mode). Emits frame t-lag_k; legitimately online.
+
+    It is a confirmation filter on the pick sequence, NOT a velocity model and NOT a
+    new leader (avoids the trajectory-led collapse) and NOT a speed cap (avoids the
+    failed smoother). It only delays commitment so a brief creep is outvoted.
+    """
+    centroids: list = []
+    track, locked_hist, start, radius = track_field_identity(
+        clip, packs, lock, gate_radius=gate_radius, frame_wh=frame_wh,
+        chosen_centroids=centroids)
+    # idx -> (cx, cy) field box-pick (only frames with a snap)
+    pick = {c[0]: (c[1], c[2]) for c in centroids if c is not None and c[1] is not None}
+    tp_by = {tp.idx: tp for tp in track}
+    order = [tp.idx for tp in track]
+
+    out: list[TrackPoint] = []
+    for i, idx in enumerate(order):
+        tp = tp_by[idx]
+        # lookahead window [idx, idx+lag_k] of field box-picks
+        win = [pick[j] for j in order[i:i + lag_k + 1] if j in pick]
+        committed = None
+        if win and idx in pick:
+            base = pick[idx]
+            agree = [w for w in win
+                     if math.hypot(w[0] - base[0], w[1] - base[1]) < radius]
+            if len(agree) / len(win) >= confirm:
+                cx = sum(w[0] for w in agree) / len(agree)
+                cy = sum(w[1] for w in agree) / len(agree)
+                committed = (cx, cy)
+        x, y = committed if committed is not None else (tp.x, tp.y)
+        # mirror identity.py's constructor: TrackPoint(idx, x, y, state, n_dets)
+        out.append(TrackPoint(idx, float(x), float(y), tp.state, tp.n_dets))
+    return out, locked_hist, start, radius
+
+
+# Causal fused-path integrator (mode "fpath"). The Viterbi-ceiling diagnostic showed
+# a causal (K=0) cumulative-path decode over the field's saliency-mass signal beats
+# greedy `field` by up to +0.24 on strong-signal clips (t10 0.70->0.94) but LOSES on
+# weak/misleading-signal clips because mass-only emission drops field's positional
+# (CV-velocity) prior. This integrator restores that prior: the per-frame emission
+# FUSES saliency mass + proximity to a running constant-velocity prediction, and a
+# spatial-continuity transition penalty (physics: true shape never moves >~1 radius/
+# frame) accumulates over a forward trellis. Fully causal (no lookahead) so it ships
+# live. Decode = argmax cumulative score each frame -> that box's centroid.
+FPATH_TRANS_W = 1.0       # transition penalty weight (jump in radii, squared)
+FPATH_PROX_W = 0.0        # weight on CV-proximity emission (0 = pure mass; prox HURTS, see CLAUDE.md)
+FPATH_PROX_SIGMA = 0.6    # proximity gaussian width in radii
+FPATH_VEL_DAMP = 0.7      # CV prediction velocity damping (matches tracker VEL_DAMP)
+FPATH_MASS_EMA = 0.98     # running-scale EMA for absolute mass normalization
+
+
+def track_fused_path_identity(clip: str | Path, packs: list[FusionPack],
+                              lock: LockInfo | None = None, *,
+                              gate_radius: float | None = None,
+                              frame_wh: tuple[int, int] | None = None,
+                              trans_w: float = FPATH_TRANS_W,
+                              prox_w: float = FPATH_PROX_W,
+                              prox_sigma: float = FPATH_PROX_SIGMA,
+                              vel_damp: float = FPATH_VEL_DAMP,
+                              mass_ema: float = FPATH_MASS_EMA,
+                              ) -> tuple[list[TrackPoint], list[int | None], int, float]:
+    """Causal Viterbi-style integrator fusing saliency mass + CV-proximity prior.
+
+    Forward trellis over YOLO boxes; state = which box is the real shape this frame.
+      emission e_t(i)   = norm_mass(i) + prox_w * exp(-(d_pred(i)/(sigma*r))^2)
+                          where d_pred = |centroid_i - CV-predicted position|
+      transition c(i,j) = trans_w * (|centroid_i - centroid_j| / r)^2
+    alpha[t][i] = e_t(i) + max_j (alpha[t-1][j] - c(i,j)); decode argmax each frame.
+    The chosen box's centroid feeds the CV predictor (its own positional memory), so
+    the path stays anchored the way field's snap_feedback does -- but globally, not
+    greedily.
+    """
+    from ld.vision.motion import estimate_motion, saliency_map
+
+    clip = Path(clip)
+    seed_x, seed_y, radius, start = _seed(packs)  # type: ignore[arg-type]
+    lock_frame = lock.frame if lock is not None else start
+    fw, fh = frame_wh if frame_wh else (None, None)
+    pos = np.array([seed_x, seed_y], np.float32)
+    vel = np.zeros(2, np.float32)
+    prev_cents: list[tuple[float, float]] | None = None
+    prev_alpha: np.ndarray | None = None
+    prev_gray: np.ndarray | None = None
+    active = False
+    mass_scale = 0.0   # running EMA of per-frame peak absolute mass (cross-frame conf)
+
+    track: list[TrackPoint] = []
+    locked_hist: list[int | None] = []
+
+    src = VideoSource(clip)
+    for idx, raw in src.frames():
+        if idx >= len(packs):
+            break
+        p = packs[idx]
+        gray = cv2.cvtColor(strip_pointer(raw, strip_green=True), cv2.COLOR_BGR2GRAY)
+
+        if p.idx < lock_frame or math.isnan(pos[0]):
+            track.append(TrackPoint(p.idx, float(pos[0]), float(pos[1]), "acquire", len(p.boxes)))
+            locked_hist.append(None)
+            if p.white is not None:
+                pos = np.array([p.white[0], p.white[1]], np.float32)
+            prev_gray = gray
+            continue
+
+        if p.idx == lock_frame and not active:
+            cx, cy = (lock.cx, lock.cy) if lock is not None else (float(pos[0]), float(pos[1]))
+            pos = np.array([cx, cy], np.float32)
+            vel[:] = 0.0
+            active = True
+            track.append(TrackPoint(p.idx, float(pos[0]), float(pos[1]), "acquire", len(p.boxes)))
+            locked_hist.append(None)
+            prev_gray = gray
+            continue
+
+        x, y, state = float(pos[0]), float(pos[1]), "coast"
+        if prev_gray is not None and active and p.boxes:
+            fld = estimate_motion(prev_gray, gray)
+            sal = saliency_map(fld, gray.shape)
+            cents = [_centroid(b) for b in p.boxes]
+            mass = np.array([_box_saliency_mass(b, sal) for b in p.boxes], np.float32)
+            # cross-frame confidence: scale by a running EMA of peak mass, NOT the
+            # per-frame max (which erases the weak/strong-frame distinction). A
+            # genuinely low-signal frame -> low emission everywhere -> the prior +
+            # transition carry the path (field's coast behavior, globally optimal).
+            fmax = float(mass.max())
+            mass_scale = fmax if mass_scale == 0.0 else max(fmax, mass_ema * mass_scale + (1 - mass_ema) * fmax)
+            mass = mass / mass_scale if mass_scale > 0 else mass
+            pred = pos + vel
+            emis = np.empty(len(cents), np.float32)
+            for i, (cx, cy) in enumerate(cents):
+                d = math.hypot(cx - pred[0], cy - pred[1])
+                prox = math.exp(-(d / (prox_sigma * radius)) ** 2)
+                emis[i] = mass[i] + prox_w * prox
+            if prev_alpha is None or prev_cents is None:
+                alpha = emis.copy()
+            else:
+                alpha = np.empty(len(cents), np.float32)
+                for i, (cx, cy) in enumerate(cents):
+                    best = -1e18
+                    for j, (px, py) in enumerate(prev_cents):
+                        dd = math.hypot(cx - px, cy - py) / radius
+                        v = prev_alpha[j] - trans_w * dd * dd
+                        if v > best:
+                            best = v
+                    alpha[i] = best + emis[i]
+            # global re-centering: keep alpha bounded (subtract max), no decision change
+            alpha = alpha - float(alpha.max())
+            choice = int(np.argmax(alpha))
+            nx, ny = cents[choice]
+            vel = vel_damp * vel + (1.0 - vel_damp) * (np.array([nx, ny], np.float32) - pos)
+            x, y, state = nx, ny, "track"
+            prev_alpha, prev_cents = alpha, cents
+        else:
+            prev_alpha, prev_cents = None, None
 
         if fw is not None:
             x = float(np.clip(x, 0, fw - 1))
@@ -1271,7 +1457,7 @@ _PAPER_PICK_MODES = (
 
 # All selectable modes, in leaderboard order. Single source of truth shared by
 # run_clip's argparse and the eval_modes harness so the two never drift.
-ALL_MODES = ("chain", *_PAPER_PICK_MODES, "outlier", "accum", "field")
+ALL_MODES = ("chain", *_PAPER_PICK_MODES, "outlier", "accum", "field", "field_lag", "fpath")
 
 
 def _dispatch_mode(clip: Path, packs: list[FusionPack], lock: LockInfo | None,
@@ -1288,6 +1474,10 @@ def _dispatch_mode(clip: Path, packs: list[FusionPack], lock: LockInfo | None,
         return track_accum_identity(clip, packs, lock, frame_wh=frame_wh)
     if mode == "field":
         return track_field_identity(clip, packs, lock, frame_wh=frame_wh)
+    if mode == "field_lag":
+        return track_field_lag_identity(clip, packs, lock, frame_wh=frame_wh)
+    if mode == "fpath":
+        return track_fused_path_identity(clip, packs, lock, frame_wh=frame_wh)
     if mode == "outlier":
         from ld.detect.outlier_track import track_outlier_identity
         return track_outlier_identity(clip, packs, lock, frame_wh=frame_wh)
@@ -1296,7 +1486,7 @@ def _dispatch_mode(clip: Path, packs: list[FusionPack], lock: LockInfo | None,
 
 def run_clip(weights: str | Path, clip: str | Path, *, conf: float = 0.25,
              imgsz: int = 768, use_cache: bool = True, evidence: bool = False,
-             mode: str = "field") -> IdentityReport:
+             mode: str = "field_lag") -> IdentityReport:
     clip = Path(clip)
     name = clip.stem.replace("_cropped_trimmed", "")
     packs = detect_fusion_clip(weights, clip, conf=conf, imgsz=imgsz, use_cache=use_cache)
