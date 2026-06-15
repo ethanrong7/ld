@@ -302,8 +302,54 @@ causal key.** That specific gap (a signal that fires on field's misses on the we
 with a live confidence) is the only thing worth hunting next; absent a genuinely new such
 signal, `field_lag` (LOO 0.721) stands as the shipped ceiling.
 
+## Box-cleanup gate (low-hanging fruit — gated 2026-06-15)
 
+YOLO emits ~18 boxes/frame (vs ~20 real shapes); hypothesis was that edge-partial /
+duplicate clutter near the real shape makes the saliency-mass snap pick a wrong neighbour
+(a creep source). Tested two FREE, reversible, no-retrain filters on the cached detections
+(gate `ld/detect/boxclean_gate.py`, run then removed): a **border filter** (drop boxes whose
+centroid is within margin of the frame edge — provably safe, the real shape's centroid never
+reaches the edge) and a **conf filter** (raise the 0.25 cache threshold).
 
+- **Border m=30 is a small free win: mean 0.721 → 0.725 (+0.003), oracle FLAT (0.929 —
+  never drops the GT box), NO clip regresses** (t9 +0.020, t5 +0.013, rest ±0.000). The
+  margin is a cliff: m=20 does nothing, m=45 breaks (t3 −0.049, its oracle 0.889→0.841 —
+  clips real shapes riding near the edge). Safe band ~30px. NOT YET SHIPPED (marginal;
+  ship only if bundling with another change).
+- **Conf filter HURTS** — c=0.40 drops the oracle (0.929→0.850; t5 0.836→0.731): it kills
+  real-shape boxes on their low-confidence frames. The oracle is the ceiling, so don't.
+- **The snap-ambiguity hypothesis was the valuable miss.** `ambig` (fraction of oracle-hit
+  frames with >1 box within snap radius of GT) is HIGH on the laggards — **t5 0.44, t8
+  0.65** — and border filtering barely moves it (0.47→0.46). So the snap IS ambiguous on the
+  weak clips, but the competing boxes are **genuine neighbouring shapes, not removable
+  clutter** — no border/conf filter can touch them. Sharper diagnosis: t5/t8 creep is the
+  real shape's TRUE neighbours winning the saliency-mass snap, which loops back to the
+  weak-signal / integration-capture wall, not a detection-cleanliness problem.
+
+## Collision-vs-camouflage oracle-gap decomposition (relabel decision — 2026-06-15)
+
+Decided whether the parked data-relabel (drop edge partials, LABEL collision partials) is
+worth doing, by decomposing the oracle-MISS frames (gate `ld/detect/collision_diag.py`, run
+then removed). Classified each oracle-miss: `covered` (a box contains GT → merged into a
+neighbour), `adjacent` (nearest centroid in (r,2r]), `empty` (>2r → true non-detection).
+
+| clip | within_r | oracle | **differentiator gap** | empty% | max oracle gain from relabel |
+|---|---|---|---|---|---|
+| t5 | 0.409 | 0.836 | **0.427** | 0.22 | ~0.13 (optimistic) |
+| t8 | 0.585 | 0.938 | **0.353** | 0.00 | ~0.06 (optimistic) |
+
+**Verdict: relabel STAYS PARKED.** The decision doesn't hinge on the collision/camouflage
+split (the `covered` metric is a soft upper bound — with ~18 boxes blanketing the sheet a
+GT point lands inside *some* box by area alone, so `covered` can't cleanly separate "merged
+into neighbour" from "GT in a fake's box corner"; only `empty` is unambiguous). It hinges on
+the gap comparison: on both laggards the **differentiator already leaves 0.35–0.43 on the
+table** (boxes that ARE on the real shape, lost to creep), while relabel's entire ceiling
+effect is at most 0.06–0.13 — and the recoverable frames are collisions, exactly when creep
+is worst, so realized gain ≪ oracle gain (likely <+0.01). Relabel attacks a gap 3–7× smaller
+than the one we already fail to close. This confirms the box-cleanup finding from the other
+side: **the binding constraint on t5/t8 is the differentiator failing to HOLD boxes it
+already has, not missing boxes.** Un-park relabel only if/when the differentiator's creep on
+detected boxes is solved and the oracle ceiling becomes the actual limiter.
 
 ## fpath: causal path integrator (`track_fused_path_identity`, mode `fpath`)
 
