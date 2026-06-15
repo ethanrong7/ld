@@ -185,11 +185,125 @@ matter — **complementarity to flow on flow's blind frames**:
   weak-channel fusion into field has only ever diluted (prox-fusion, router).
 
 **Pattern across ALL failed avenues** (smoother-cap, confirm-gate, prox-fusion, router×3,
-box-residual): field (0.714) sits at the causal-integration ceiling (Viterbi K=0 0.724)
-over a signal that's 0.886-available at top-3. The binding limiter is **integration
-capture** (hold signal without creeping), which is regime-coupled and resists every
-decision-side and signal-fusion fix. The one proven-positive unbuilt lever is the
-**fixed-lag smoother** (+0.03, physically free) — see Open avenues #0.
+box-residual, rotation-selector): field (0.714) sits at the causal-integration ceiling
+(Viterbi K=0 0.724) over a signal that's 0.886-available at top-3. The binding limiter is
+**integration capture** (hold signal without creeping), which is regime-coupled and
+resists every decision-side and signal-fusion fix. The one proven-positive lever was the
+**fixed-lag smoother** (+0.03, physically free) — now SHIPPED as `field_lag`.
+
+## Rotation-selector dead end (avenue #3 — gated and killed 2026-06-15)
+
+The "rotation rescues exactly the clips translation fails (t3, t8)" framing in the old
+avenue #3 was **not supported by data** (gate `ld/detect/rot_gate.py`, run then removed;
+result is the record). Independent-rotation magnitude (`_box_net_rotations`, log-polar
+phase correlation — already wired into the `paper`/`accum` modes) was tested against the
+same complementarity + causal-key bar that killed box-residual and the router:
+
+| metric | base (all rescuable-detected) | on field's rescuable-miss frames | lift |
+|---|---|---|---|
+| rot top-1 (GT box is highest-rotation) | 0.09 | 0.09 | **+0.005** |
+| rot top-3 | 0.24 | 0.25 | **+0.013** |
+
+- **Not preferentially complementary.** On the frames field gets wrong (but where the GT
+  box IS detected, so a picker *could* rescue), rotation points at the GT box at its own
+  base rate — lift ≈ 0. It does not light up when field is dark (same failure as residual).
+- **The t3/t8 claim is false.** On exactly the clips rotation was supposed to rescue,
+  on-miss top1 = base (t3 0.08=0.08, t8 0.09 vs 0.08). Rotation is weakest on the laggards.
+- **No causal key.** Splitting miss frames by top-rotation magnitude (the live-observable
+  conviction proxy) gives 0.09 high vs 0.09 low — conviction does not mark correctness, so
+  there's no online signal to gate a selector on (the router lesson, repeated).
+
+**Conclusion: a rotation selector would dilute exactly like prox-fusion and the router.
+Do not build it.** The avenue is removed from the open list. With #0 (fixed-lag) shipped
+and #2 (box-residual) + #3 (rotation) both dead, every enumerated downstream/signal-fusion
+avenue is exhausted — the remaining lever is a genuinely **stronger or differently-derived
+per-frame signal** (new upstream evidence), not any recombination of the existing channels.
+
+## BraveDown reference solver (`data/successful_examples/`, local-only) — what it reveals
+
+A third-party solver clip (988 frames, 1080p) overlays its own internals: persistent
+`ID:N` boxes on every shape, a red `REAL_ID:N` box, a green target dot with a confidence
+score (~0.96), and a magenta sheet-boundary polygon. The footage also shows its **client**
+source (`def main()`: argparse `--server http://localhost:5000`, `--video-path`,
+`client = TrackingClient(server_url=...)` + a `display_frame` drawer). Key reads:
+
+- **Client/server split; the tracker is server-side and NEVER shown.** The video does not
+  hand us their algorithm — only their behavior.
+- **They acquire at the countdown**, before gameplay motion (`REAL_ID:7` already locked on
+  the first countdown frame) — same as our `compute_countdown_lock`.
+- **Their identity fragments too** (`REAL_ID` migrates 7→27 mid-clip, new box IDs spawn)
+  yet the green dot stays glued to the real shape — so they run a **position track that
+  outlives box re-ID**, structurally the same as our `field`. No better association scheme.
+- **The honest conclusion: the reference does NOT reveal a missing trick.** Its
+  architecture mirrors ours; its stable ~0.96 confidence suggests stronger *per-frame
+  discrimination* (the signal channel), consistent with every gate's finding.
+
+## Appearance-channel gate (candidate A — NCC template tracker; gated 2026-06-15)
+
+Motivated by the above (an appearance/correlation channel is the one thing we lack — all
+our signal is the single LK+RANSAC motion-outlier map). Tested a standalone normalized-
+cross-correlation template tracker (`cv2.matchTemplate` CCOEFF_NORMED) seeded at the
+countdown lock — pure appearance self-consistency, orthogonal to flow; the peak corr is a
+built-in causal key. Gate `ld/detect/corr_gate.py` (run then removed; result is the record):
+
+| policy | NCC within_r | complementarity lift (on-miss − base) | causal key (hi−lo) |
+|---|---|---|---|
+| static template | 0.06 | +0.004 | +0.038 |
+| confidence-adapted | 0.07 | −0.012 | −0.012 |
+
+- **DEAD at the bar**, but informatively. Standalone NCC is near-useless (~0.06) — the
+  real shape **rotates independently**, so a translation-only template de-correlates within
+  a few frames and locks onto near-identical neighbours on the tan relief. Adapting the
+  template made it worse (adapts onto the drift).
+- **One real positive — t8.** On t8 (a laggard, field 0.59) static NCC on field's miss
+  frames hits 0.23 vs 0.13 base AND its confidence key separates hard (hi 0.42 / lo 0.05).
+  So appearance self-consistency IS the right *kind* of orthogonal signal — it has a
+  working causal key where the shape is appearance-distinct — but **plain translation-NCC
+  is the wrong implementation; rotation kills it.**
+
+**Next lever (unbuilt): a ROTATION-INVARIANT appearance descriptor** — match the patch in
+log-polar space (rotation→shift, the machinery already exists in `_logpolar_roi` /
+`_box_net_rotations`), or a rotation-normalized template, so self-consistency survives the
+real shape's independent spin. This is the one candidate the data still supports; gate it
+the same way before building.
+
+### Rotation-invariant appearance gate (candidate A' — log-polar phase corr; gated 2026-06-15)
+
+Built exactly that: a standalone tracker that, among YOLO boxes near the last position
+(continuity), picks the one whose **log-polar** view best phase-correlates with the seed
+patch (rotation→shift LP absorbs; peak response = causal key). Reused `_logpolar_roi` /
+`ROT_ROI_N`. Gate `ld/detect/lpcorr_gate.py` (run then removed; result is the record):
+
+| policy | LP within_r | complementarity lift (on-miss − base) | causal key (hi−lo) |
+|---|---|---|---|
+| static | **0.24** | −0.030 | +0.086 |
+| confidence-adapted | 0.21 | −0.021 | +0.093 |
+
+- **The rotation diagnosis was right** — rotation-invariance lifted the raw tracker **4×**
+  (0.24 vs NCC's 0.06). Log-polar phase corr genuinely follows the real shape through its
+  spin. The *mechanism* works.
+- **But DEAD at the complementarity bar — structurally.** Aggregate lift is **negative**
+  (on-miss ≤ base). The per-clip pattern is the tell: LP helps on **t7 (+0.31), t9 (+0.18),
+  t3** but is strongly anti-complementary on **t4 (−0.27), t6 (−0.18), t8 (−0.15)** — incl.
+  t8, the laggard it was meant to rescue. This is **the fpath regime split reincarnated**:
+  the appearance channel rescues the strong-signal clips (where fpath already wins) and
+  fails the weak/misleading clips (where field's CV-coast wins), landing on the SAME regime
+  axis — with no new causal key (global hi−lo only +0.086) to route on.
+- **Collapses into the router dead end.** Real per-clip complementarity, no causal key to
+  exploit it live. Same wall as field⇄fpath.
+
+**Conclusion — the appearance channel is exhausted.** Both translation-NCC (rotation kills
+it) and rotation-invariant log-polar (works mechanically, but regime-coupled to fpath with
+no causal key) fail. Appearance does NOT provide a regime-orthogonal lever; it re-derives
+fpath's strong-signal competence by a different route. **The binding limiter remains
+integration-capture on the weak/misleading clips (t4, t5, t8), and NO channel we have
+tested — flow, residual, rotation, appearance — is preferentially strong THERE with a
+causal key.** That specific gap (a signal that fires on field's misses on the weak clips,
+with a live confidence) is the only thing worth hunting next; absent a genuinely new such
+signal, `field_lag` (LOO 0.721) stands as the shipped ceiling.
+
+
+
 
 ## fpath: causal path integrator (`track_fused_path_identity`, mode `fpath`)
 
@@ -233,9 +347,9 @@ candidate routing signals fail. The ~0.83 is a diagnostic ceiling, not a target.
    binding integration-capture gap.
 ~~Regime router (field⇄fpath)~~ — **DEAD, see "Router dead end" above.** No causal
    signal exploits the ~0.83 oracle. Do not rebuild without a genuinely new signal.
-3. **Rotation as a SELECTOR, not a blender** (signal, helps laggards) — rotation
-   rescues exactly the clips translation fails (t3, t8) but naive weighted fusion
-   dilutes both signals. Use whichever signal is locally confident, don't average.
+~~Rotation as a SELECTOR~~ — **DEAD, see "Rotation-selector dead end" below.** Rotation
+   is NOT preferentially complementary on field's misses (on-miss top1 lift +0.005) and
+   has no causal confidence key; the "rescues t3/t8" claim was not supported by data.
 
 ## Viterbi-ceiling result (`ld/detect/viterbi_ceiling.py` → `VITERBI_CEILING.md`)
 
