@@ -351,6 +351,24 @@ side: **the binding constraint on t5/t8 is the differentiator failing to HOLD bo
 already has, not missing boxes.** Un-park relabel only if/when the differentiator's creep on
 detected boxes is solved and the oracle ceiling becomes the actual limiter.
 
+## Top-K confidence cap gate (2026-06-15)
+
+Tested capping each frame to the K highest-confidence boxes (adaptive version of the failed
+fixed-conf filter; idea: only ~20 real shapes exist, so keep ~20 boxes). Gate
+`ld/detect/topk_gate.py`, run then removed. The decisive measurement is the **real shape's
+confidence RANK** on oracle-hit frames: **median 9–13, max 20–28 per clip** (t8 max 28, t5
+max 24). The real shape is a MIDDLING detection, not a top one — being camouflaged (what
+makes it the target) also makes YOLO less confident of it.
+
+- **K=20 (the requested cap) REGRESSES**: mean −0.001, drops the oracle on its faint frames
+  (t8 0.938→0.919, −0.010; t3 −0.009) — the same failure as the fixed conf filter, rank-based.
+- **K=25 is oracle-safe but worthless**: mean +0.001 (within noise, < border filter's +0.003),
+  oracle flat 0.929, no regression. Most frames already have <25 boxes so it rarely fires.
+- **Lesson / third confirmation:** you CANNOT filter to the real shape by confidence — it is
+  precisely the box that LACKS confidence. The "~20 shapes ⇒ keep top 20" premise is false:
+  the 20 real shapes are not the 20 most-confident boxes, and the real one in particular
+  ranks 15–28 on hard frames. Not shipped.
+
 ## fpath: causal path integrator (`track_fused_path_identity`, mode `fpath`)
 
 Built from the Viterbi-ceiling insight. Forward Viterbi trellis over YOLO boxes,
