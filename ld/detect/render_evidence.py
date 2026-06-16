@@ -61,10 +61,10 @@ def render_clip(weights: str, clip: Path, *, conf: float = 0.25,
     for idx, frame in src.frames():
         p = packs[idx] if idx < len(packs) else None
 
-        # Draw YOLO boxes
+        # Draw YOLO boxes  (FusionPack.boxes = (x1,y1,x2,y2,conf) tuples)
         if p is not None and p.boxes:
             for b in p.boxes:
-                x1, y1, x2, y2 = int(b.x1), int(b.y1), int(b.x2), int(b.y2)
+                x1, y1, x2, y2 = int(b[0]), int(b[1]), int(b[2]), int(b[3])
                 cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 1)
 
         # Draw GT crosshair
