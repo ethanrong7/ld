@@ -42,6 +42,14 @@ class MotionField:
     inliers: np.ndarray                    # (N,2) features moving with the paper
     outliers: np.ndarray                   # (M,2) features moving independently
     outlier_weights: np.ndarray            # (M,) clamped residual magnitude per outlier
+    outlier_vectors: np.ndarray = None     # (M,2) residual VECTOR (b-pred) per outlier;
+    #   direction the feature moves relative to the rigid sheet. saliency_map keeps only
+    #   the magnitude; the directional/temporal COHERENCE of these vectors is a separate,
+    #   stronger separator of the real shape (see coh_gate / coherence emission).
+
+    def __post_init__(self):
+        if self.outlier_vectors is None:
+            self.outlier_vectors = np.empty((0, 2), np.float32)
 
     @property
     def ok(self) -> bool:
@@ -72,13 +80,15 @@ def estimate_motion(prev_gray: np.ndarray, cur_gray: np.ndarray) -> MotionField:
         return MotionField(None, empty, empty, np.empty((0,), np.float32))
 
     pred = (a @ affine[:, :2].T) + affine[:, 2]
-    resid = np.linalg.norm(pred - b, axis=1)
+    delta = b - pred
+    resid = np.linalg.norm(delta, axis=1)
     out = resid > OUTLIER_RESID_MIN
     return MotionField(
         affine=affine,
         inliers=a[~out],
         outliers=a[out],
         outlier_weights=np.clip(resid[out], 0.0, OUTLIER_RESID_CAP),
+        outlier_vectors=delta[out].astype(np.float32),
     )
 
 

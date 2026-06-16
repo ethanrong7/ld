@@ -1047,6 +1047,88 @@ def track_accum_identity(clip: str | Path, packs: list[FusionPack],
 
 FIELD_SNAP_FRAC = 1.0   # snap field output to nearest YOLO box within this x gate
 
+# Coherence snap-weight blend (coherence emission integrator). The snap normally picks
+# argmax saliency-MASS; this reweights it by the directional/temporal COHERENCE of the
+# outlier residual vectors inside each box, accumulated over a causal window. coherence =
+# ||sum vecs|| / sum||vecs|| in [0,1]: ~1 when the box's independent motion all points one
+# way (the real shape drifting rigidly), ~0 when it's incoherent noise/fakes. The probe
+# (coh_gate) showed the coherent box already sits on GT 50% of field's still-wrong frames.
+FIELD_COH_LAMBDA = 0.0  # 0 = OFF (field/field_lag byte-identical to pre-coherence leader)
+FIELD_COH_WIN = 16      # causal window (frames) the coherent-mass is accumulated over
+
+# Coherence FAR-JUMP override (mode "field_coh"). The snap-weight blend above is confined
+# to the snap radius and CANNOT reach the recoverable signal (measured: on t5's wrong frames
+# the coherent on-GT box is OUTSIDE the snap radius 190x vs 4x inside). The signal is an
+# escape-from-lock-in cue: when a coherent-mass challenger persistently disagrees with the
+# committed pick, is FAR away, and is confident (margin>=tau), override to it. Validated via
+# coh_gate at LOO 0.7442 (+0.023 over field_lag, no clip regresses). Config = the gate's
+# LOO-robust corner (single conservative cfg, do-no-harm on every clip incl. t1).
+FIELD_COH_OVR_WIN = 16       # accumulation window for coherent-mass challenger
+FIELD_COH_OVR_TAU = 0.30     # min margin (top-runnerup)/top to trust the challenger [causal key]
+FIELD_COH_OVR_C = 8          # consecutive frames of far+confident disagreement before override
+FIELD_COH_OVR_FAR = 1.5      # challenger must be > this many radii from the committed pick
+FIELD_COH_CURL_W = 0.0       # weight of rotational-curl vs translational coherence in the fused
+#   challenger. 0 = SHIPPED (coherence-only). Rotational curl DOES localize the camouflaged real
+#   shape (curl_probe: t5 top-3 0.70, t8 0.64 — falsifies the old "rotation weakest on laggards"
+#   claim) and its top-3 MISSES are disjoint from coherence's (fuse_probe union lift +0.14..+0.25).
+#   BUT fusing it into the argmax far-jump override does NOT help: curl's top-1 is far weaker than
+#   its top-3 (t5 0.35 vs 0.70), so its argmax often points at a fake, and max-fusion lets curl's
+#   confident-but-wrong frames trigger wrong overrides (curl_w=1.0 -> -0.016 mean, t5 -0.047, the
+#   clip it should rescue; curl_w=0.5 is inert). The disjoint coverage is real in LOCALIZATION but
+#   not exploitable via argmax+margin — curl's margin doesn't mark its correctness (causal-key wall
+#   one level down). A future mechanism using curl's TOP-3 (e.g. restrict coherence search to curl's
+#   top-3 boxes) is unbuilt; do not re-enable curl_w in the override without it.
+
+
+def _box_coherent_mass(box: tuple, ovecs_win) -> float:
+    """Resultant of outlier residual VECTORS inside `box`, weighted by directional
+    coherence, accumulated over a causal window. `ovecs_win` is a list of (pix, vecs)
+    pairs (newest-first or any order; order-independent) where pix is (M,2) feature
+    positions and vecs is (M,2) residual vectors for one past frame."""
+    acc = 0.0
+    for pix, vecs in ovecs_win:
+        if pix.shape[0] == 0:
+            continue
+        inb = ((pix[:, 0] >= box[0]) & (pix[:, 0] <= box[2])
+               & (pix[:, 1] >= box[1]) & (pix[:, 1] <= box[3]))
+        if inb.sum() < 2:
+            continue
+        v = vecs[inb]
+        net = float(np.linalg.norm(v.sum(0)))
+        tot = float(np.linalg.norm(v, axis=1).sum())
+        if tot > 1e-6:
+            acc += net * (net / tot)
+    return acc
+
+
+def _box_rotational_curl(box: tuple, ovecs_win) -> float:
+    """Coherent ROTATIONAL curl of the residual vectors inside `box`, accumulated over a
+    causal window. Orthogonal to `_box_coherent_mass`: translational coherence sums
+    circulating vectors to ~0 (blind to pure rotation), this measures the signed angular
+    momentum Σ(r×v) of vectors about their centroid — large when the box's independent
+    motion is a coherent spin (the real shape rotating), ~0 for rigid fakes / incoherent
+    noise. Probe (curl_probe/fuse_probe): top-3-localizes the camouflaged real shape on
+    t5 0.70 / t8 0.64 where appearance-based rotation fails, and its MISSES are disjoint
+    from coherence's (union lift +0.14..+0.25 on laggard miss frames)."""
+    acc = 0.0
+    for pix, vecs in ovecs_win:
+        if pix.shape[0] < 3:
+            continue
+        inb = ((pix[:, 0] >= box[0]) & (pix[:, 0] <= box[2])
+               & (pix[:, 1] >= box[1]) & (pix[:, 1] <= box[3]))
+        if inb.sum() < 3:
+            continue
+        P = pix[inb]
+        V = vecs[inb]
+        c = P.mean(0)
+        R = P - c
+        cross = R[:, 0] * V[:, 1] - R[:, 1] * V[:, 0]   # z of r×v per feature
+        den = float((np.linalg.norm(R, axis=1) * np.linalg.norm(V, axis=1)).sum())
+        s = float(cross.sum())
+        if den > 1e-6:
+            acc += abs(s) * (abs(s) / den)
+    return acc
+
 
 def _box_saliency_mass(box: tuple, sal: np.ndarray) -> float:
     h, w = sal.shape
@@ -1065,7 +1147,10 @@ def track_field_identity(clip: str | Path, packs: list[FusionPack],
                          snap_frac: float = FIELD_SNAP_FRAC,
                          snap_mode: str = "mass",
                          snap_feedback: bool = True,
+                         coh_lambda: float = FIELD_COH_LAMBDA,
+                         coh_win: int = FIELD_COH_WIN,
                          chosen_centroids: list | None = None,
+                         ovecs_out: list | None = None,
                          ) -> tuple[list[TrackPoint], list[int | None], int, float]:
     """Position-field tracker: identity-free, fragmentation-immune.
 
@@ -1096,6 +1181,10 @@ def track_field_identity(clip: str | Path, packs: list[FusionPack],
 
     track: list[TrackPoint] = []
     locked_hist: list[int | None] = []
+
+    # Rolling causal window of (positions, vectors) for the coherence snap-weight.
+    from collections import deque
+    ovecs_hist: deque = deque(maxlen=coh_win) if coh_lambda > 0 else None
 
     src = VideoSource(clip)
     for idx, raw in src.frames():
@@ -1129,13 +1218,27 @@ def track_field_identity(clip: str | Path, packs: list[FusionPack],
             sal = saliency_map(field, gray.shape)
             tp = tracker.update(p.idx, sal)
             x, y, state = tp.x, tp.y, tp.state
+            if ovecs_hist is not None:
+                ovecs_hist.append((field.outliers, field.outlier_vectors))
+            if ovecs_out is not None:
+                ovecs_out.append((p.idx, field.outliers, field.outlier_vectors))
 
         if yolo_snap and p.boxes:
             near = [b for b in p.boxes
                     if math.hypot(_centroid(b)[0] - x, _centroid(b)[1] - y) <= snap_dist]
             chosen = None
             if snap_mode == "mass" and near and sal is not None and sal.max() > 0:
-                chosen = max(near, key=lambda b: _box_saliency_mass(b, sal))
+                if coh_lambda > 0 and ovecs_hist:
+                    win = list(ovecs_hist)
+                    cohs = [_box_coherent_mass(b, win) for b in near]
+                    cmax = max(cohs)
+                    cn = [c / cmax if cmax > 1e-9 else 0.0 for c in cohs]
+                    chosen = max(range(len(near)),
+                                 key=lambda i: _box_saliency_mass(near[i], sal)
+                                 * (1.0 + coh_lambda * cn[i]))
+                    chosen = near[chosen]
+                else:
+                    chosen = max(near, key=lambda b: _box_saliency_mass(b, sal))
             elif near:
                 chosen = min(near, key=lambda b: math.hypot(_centroid(b)[0] - x, _centroid(b)[1] - y))
             if chosen is not None:
@@ -1166,6 +1269,9 @@ def track_field_lag_identity(clip: str | Path, packs: list[FusionPack],
                              frame_wh: tuple[int, int] | None = None,
                              lag_k: int = FIELD_LAG_K,
                              confirm: float = FIELD_LAG_CONFIRM,
+                             coh_lambda: float = FIELD_COH_LAMBDA,
+                             coh_win: int = FIELD_COH_WIN,
+                             ovecs_out: list | None = None,
                              ) -> tuple[list[TrackPoint], list[int | None], int, float]:
     """Fixed-lag confirmation over field's box-pick sequence.
 
@@ -1181,7 +1287,8 @@ def track_field_lag_identity(clip: str | Path, packs: list[FusionPack],
     centroids: list = []
     track, locked_hist, start, radius = track_field_identity(
         clip, packs, lock, gate_radius=gate_radius, frame_wh=frame_wh,
-        chosen_centroids=centroids)
+        coh_lambda=coh_lambda, coh_win=coh_win,
+        chosen_centroids=centroids, ovecs_out=ovecs_out)
     # idx -> (cx, cy) field box-pick (only frames with a snap)
     pick = {c[0]: (c[1], c[2]) for c in centroids if c is not None and c[1] is not None}
     tp_by = {tp.idx: tp for tp in track}
@@ -1204,6 +1311,103 @@ def track_field_lag_identity(clip: str | Path, packs: list[FusionPack],
         x, y = committed if committed is not None else (tp.x, tp.y)
         # mirror identity.py's constructor: TrackPoint(idx, x, y, state, n_dets)
         out.append(TrackPoint(idx, float(x), float(y), tp.state, tp.n_dets))
+    return out, locked_hist, start, radius
+
+
+def _coh_challenger_per_frame(packs, ovecs, order, win, curl_w=FIELD_COH_CURL_W):
+    """Per frame: (challenger_centroid, margin) by accumulated coherent-mass over the last
+    `win` frames at each current box's location. `ovecs` is {idx: (positions, vectors)} from
+    the production tracker (no second flow pass). margin = (top-runnerup)/top is the causal
+    confidence key.
+
+    When `curl_w` > 0, FUSES translational coherence with rotational curl: each signal is
+    normalized to [0,1] across the frame's boxes and combined as max(coh_n, curl_w*curl_n).
+    The two signals fail disjoint frames (coherence is blind to pure rotation, curl to pure
+    translation), so the fused challenger fires where EITHER points confidently — covering
+    coherence's blind spots on the laggards (probe: union lift +0.14..+0.25 on miss frames)."""
+    pos_of = {idx: i for i, idx in enumerate(order)}
+    out = {}
+    for idx in order:
+        if idx >= len(packs):
+            continue
+        p = packs[idx]
+        if not p.boxes:
+            out[idx] = None
+            continue
+        i0 = pos_of[idx]
+        window = []
+        for back in range(win):
+            j = i0 - back
+            if j < 0:
+                break
+            ov = ovecs.get(order[j])
+            if ov is not None:
+                window.append(ov)
+        coh = [_box_coherent_mass(b, window) for b in p.boxes]
+        if curl_w > 0:
+            curl = [_box_rotational_curl(b, window) for b in p.boxes]
+            cmax = max(coh) or 1.0
+            rmax = max(curl) or 1.0
+            scores = [max(coh[i] / cmax, curl_w * curl[i] / rmax)
+                      for i in range(len(p.boxes))]
+        else:
+            scores = coh
+        bi = max(range(len(scores)), key=lambda i: scores[i])
+        top = scores[bi]
+        run = max((scores[i] for i in range(len(scores)) if i != bi), default=0.0)
+        margin = (top - run) / (top + 1e-6) if top > 0 else 0.0
+        out[idx] = (_centroid(p.boxes[bi]), margin)
+    return out
+
+
+def track_field_coh_identity(clip: str | Path, packs: list[FusionPack],
+                             lock: LockInfo | None = None, *,
+                             gate_radius: float | None = None,
+                             frame_wh: tuple[int, int] | None = None,
+                             win: int = FIELD_COH_OVR_WIN,
+                             tau: float = FIELD_COH_OVR_TAU,
+                             c_consec: int = FIELD_COH_OVR_C,
+                             far_r: float = FIELD_COH_OVR_FAR,
+                             curl_w: float = FIELD_COH_CURL_W,
+                             ) -> tuple[list[TrackPoint], list[int | None], int, float]:
+    """field_lag + coherence FAR-JUMP override (the shipped coherence mode).
+
+    Runs the field_lag tracker, then overrides its emitted (x,y) to a coherent-mass
+    challenger when that challenger persistently (>=c_consec frames) disagrees with the
+    committed pick, is >far_r radii away, and is confident (margin>=tau). The challenger
+    is the box maximizing the directional/temporal COHERENCE of the outlier residual
+    vectors (`_box_coherent_mass`) accumulated over a causal window -- the real shape
+    drifting rigidly produces coherent vectors; incoherent noise/fakes do not.
+
+    Captures the escape-from-lock-in failure (field_lag drifts onto a fake; the real shape
+    is far away with a coherent signal) that the local snap-weight cannot reach. Strictly
+    causal (backward-only window + streak). Validated LOO 0.7442 (+0.023 over field_lag)."""
+    ovecs_out: list = []
+    lag_track, locked_hist, start, radius = track_field_lag_identity(
+        clip, packs, lock, gate_radius=gate_radius, frame_wh=frame_wh,
+        ovecs_out=ovecs_out)
+
+    ovecs = {idx: (pos, vec) for idx, pos, vec in ovecs_out}
+    order = [tp.idx for tp in lag_track]
+    chal = _coh_challenger_per_frame(packs, ovecs, order, win, curl_w=curl_w)
+
+    far_px = far_r * radius
+    streak = 0
+    out: list[TrackPoint] = []
+    for tp in lag_track:
+        x, y = tp.x, tp.y
+        ch = chal.get(tp.idx)
+        if ch is not None:
+            (chx, chy), margin = ch
+            if math.hypot(chx - tp.x, chy - tp.y) > far_px and margin >= tau:
+                streak += 1
+            else:
+                streak = 0
+            if streak >= c_consec:
+                x, y = chx, chy
+        else:
+            streak = 0
+        out.append(TrackPoint(tp.idx, float(x), float(y), tp.state, tp.n_dets))
     return out, locked_hist, start, radius
 
 
@@ -1457,7 +1661,7 @@ _PAPER_PICK_MODES = (
 
 # All selectable modes, in leaderboard order. Single source of truth shared by
 # run_clip's argparse and the eval_modes harness so the two never drift.
-ALL_MODES = ("chain", *_PAPER_PICK_MODES, "outlier", "accum", "field", "field_lag", "fpath")
+ALL_MODES = ("chain", *_PAPER_PICK_MODES, "outlier", "accum", "field", "field_lag", "field_coh", "fpath")
 
 
 def _dispatch_mode(clip: Path, packs: list[FusionPack], lock: LockInfo | None,
@@ -1476,6 +1680,8 @@ def _dispatch_mode(clip: Path, packs: list[FusionPack], lock: LockInfo | None,
         return track_field_identity(clip, packs, lock, frame_wh=frame_wh)
     if mode == "field_lag":
         return track_field_lag_identity(clip, packs, lock, frame_wh=frame_wh)
+    if mode == "field_coh":
+        return track_field_coh_identity(clip, packs, lock, frame_wh=frame_wh)
     if mode == "fpath":
         return track_fused_path_identity(clip, packs, lock, frame_wh=frame_wh)
     if mode == "outlier":
@@ -1486,7 +1692,7 @@ def _dispatch_mode(clip: Path, packs: list[FusionPack], lock: LockInfo | None,
 
 def run_clip(weights: str | Path, clip: str | Path, *, conf: float = 0.25,
              imgsz: int = 768, use_cache: bool = True, evidence: bool = False,
-             mode: str = "field_lag") -> IdentityReport:
+             mode: str = "field_coh") -> IdentityReport:
     clip = Path(clip)
     name = clip.stem.replace("_cropped_trimmed", "")
     packs = detect_fusion_clip(weights, clip, conf=conf, imgsz=imgsz, use_cache=use_cache)
@@ -1519,8 +1725,10 @@ def main() -> None:
     ap.add_argument("--evidence", action="store_true")
     ap.add_argument("--mode",
                     choices=ALL_MODES,
-                    default="field",
-                    help="field=default, leader (position-field saliency + YOLO snap); "
+                    default="field_coh",
+                    help="field_coh=default, leader (field_lag + coherence far-jump "
+                         "override); field_lag=fixed-lag confirmation smoother over field; "
+                         "field=underlying position-field saliency + YOLO snap; "
                          "accum=causal per-tracklet evidence + rotation; "
                          "paper_outlier_rank/paper/etc=older per-frame baselines; "
                          "see ld/detect/LEADERBOARD.md for the full ranking")

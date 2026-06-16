@@ -24,7 +24,47 @@ budget" below — but unbounded future access is not.
 2. **Identity** — decides *which* box is the real shape over time. This is the
    bottleneck and the entire focus of the work. Code in `ld/detect/identity.py`.
 
-## Current best: `field_lag` mode (the default)
+## Current best: `field_coh` mode (the default)
+
+`track_field_coh_identity` in `ld/detect/identity.py` — `field_lag` (below) plus a
+**coherence far-jump override**. This is the first signal to break the long-standing
+"every motion-derived avenue is exhausted / t5–t8 is an identifiability limit"
+conclusion. The new evidence is the **directional + temporal COHERENCE of the outlier
+residual VECTORS** — `saliency_map` keeps only residual *magnitudes* and discards
+direction, so every prior signal test was magnitude-blind and never used this:
+
+  coherent_mass(box) = ‖Σ resid_vecs_in_box‖ · coherence,
+      coherence = ‖Σ resid_vecs‖ / Σ‖resid_vecs‖  ∈ [0,1]
+  accumulated over a causal window (`FIELD_COH_OVR_WIN=16`). coherence ≈ 1 when a box's
+  independent motion all points one way (the real shape drifting rigidly), ≈ 0 for
+  incoherent noise/fakes. challenger = argmax; margin = (top−runnerup)/top [causal key].
+
+The override rewrites `field_lag`'s emitted (x,y) to the challenger centroid when, for
+≥`FIELD_COH_OVR_C=8` consecutive frames, the challenger persistently disagrees with the
+committed pick, is >`FIELD_COH_OVR_FAR=1.5` radii away, and is confident
+(margin≥`FIELD_COH_OVR_TAU=0.30`). It attacks the **escape-from-lock-in** failure: when
+`field_lag` has drifted onto a fake, the real shape is *far away* with a coherent signal.
+Strictly causal (backward-only window + streak). `motion.py` now exposes
+`MotionField.outlier_vectors` and the tracker collects them in a single flow pass.
+
+**Scores:** in-sample **0.742** (vs `field_lag` 0.721, +0.021), gate LOO **0.7442**
+(single conservative config, stable across all 10 folds). **No clip regresses** — every
+clip improves or ties: t5 **+0.053** (the worst laggard; median err 97→75px), t2 +0.035,
+t3 +0.038, t6 +0.028, t7 +0.022, t10 +0.017, t8 +0.009, t1 +0.008, t4 +0.002, t9 +0.000.
+
+**Why it's NOT a dead end like every prior signal:** it is *not* regime-coupled (helps
+strong AND weak clips), has a *working causal key* (the coherence margin gate fires
+selectively, do-no-harm), and lands its biggest gain on t5. The "identifiability limit"
+was really a *magnitude-channel* limit; direction separates the real shape there.
+
+**Headroom (probe, `coh_gate._probe_headroom`):** on the still-wrong+silent frames the
+*ungated* coherent challenger already sits on GT **50%** of the time (t5 0.556) — but
+**90%+ of those frames are OUTSIDE the snap radius** (t5: 190 out / 4 in). So the signal
+is an escape-from-lock-in cue requiring a FAR jump, which is exactly why a local
+snap-weight blend FAILED (0 change; see below) and the far-jump override works. Capturing
+the rest needs a mechanism that can teleport — see "Open avenues".
+
+## The smoother layer: `field_lag` mode
 
 `track_field_lag_identity` in `ld/detect/identity.py` — a thin **fixed-lag
 confirmation smoother** wrapped around the `field` tracker (below). It defers
@@ -36,7 +76,9 @@ adjacent fake before it can poison the CV velocity and lock in — the one
 empirically-confirmed failure mode. It emits frame `t-K`, so it is legitimately
 online (the ~8-frame lag is well inside the latency budget; see below). It is a
 confirmation filter on the pick sequence — NOT a velocity cap, NOT a new leader, NOT
-an emission fusion (all three of those FAILED; see below).
+an emission fusion (all three of those FAILED; see below). `field_coh` wraps it and it
+remains selectable. Its gains and the override's gains are **additive** (disjoint
+failure modes: field_lag kills creep at onset, coh escapes an already-locked fake).
 
 **Scores:** leave-one-out (honest, held-out) **0.721** (vs `field` 0.693, +0.028),
 in-sample **0.721**. The LOO winner (`lag_k=8, confirm=0.5`) is stable across all 10
@@ -369,6 +411,100 @@ makes it the target) also makes YOLO less confident of it.
   the 20 real shapes are not the 20 most-confident boxes, and the real one in particular
   ranks 15–28 on hard frames. Not shipped.
 
+## Box-envelopment filter (gated and killed 2026-06-15)
+
+Physical observation (correct): identical same-size shapes cannot nest, so a YOLO box that
+*fully envelopes* another is an artifact (a loose/merged box). Occurs on **37% of t5 frames**
+(323 pairs); the enveloping OUTER box is the oversized/merged one in 210/323. Tested four
+drop policies through the REAL `field`/`field_lag` tracker (gate `ld/detect/envelop_gate.py`,
+run then removed — NOT the area-biased GT-containment proxy, which misleads: a bigger box
+contains the GT *point* more often by area alone).
+
+| policy | mean Δwithin_r (field_lag, t1–t10) | worst clip | oracle |
+|---|---|---|---|
+| drop_outer | **−0.015** | t5 −0.022 | 0.929→0.923 (drops) |
+| drop_inner | −0.007 | **t1 −0.048**, t6 −0.047 | flat |
+| drop_lowconf | −0.006 | t4 −0.039 | 0.921 |
+| drop_highconf | −0.016 | −0.032 | drops |
+
+- **The intuitive fix (drop_outer) is the WORST** — it lowers the oracle. That loose outer box
+  is often the *only* coverage of the real shape mid-drift between two tight detections, so
+  removing it strips real-shape boxes.
+- **drop_inner is do-no-harm on the laggards** (t5 +0.006, t8 ±0) but **regresses strong clips**
+  (t1 0.816→0.781, t6 0.814→0.767) for −0.007 net. Same regime-coupling as every prior gate:
+  laggard-local effect that dilutes elsewhere.
+- **Same wall as box-cleanup:** the envelopment boxes near the real shape are **genuine competing
+  neighbour shapes, not removable clutter.** Geometry alone can't tell the real-shape's enveloping
+  box from a fake's. Not shipped.
+
+## Multi-baseline optical-flow dead end (avenue #0-signal — gated and killed 2026-06-15)
+
+The one upstream lever the prior conclusion pointed at: the real shape moves median **1.3 px/frame**
+vs the **1.5 px** `OUTLIER_RESID_MIN` threshold, so on a typical frame its own displacement is
+BELOW threshold and the 1-frame flow signal vanishes. Hypothesis: a longer baseline (warp t−K→t via
+the composed rigid fit; sheet stays rigid, real shape drifts ~K×1.3 px) surfaces it. Probe
+(`ld/detect/baseline_probe.py`, run then removed) measured GT-box rank by outlier-saliency mass per
+baseline K∈{1,2,4,8}:
+
+| K | t5 top1 | t5 top3 | t8 top1 | t8 top3 |
+|---|---|---|---|---|
+| **1** | **0.355** | **0.686** | **0.459** | **0.687** |
+| 8 | 0.210 | 0.503 | 0.336 | 0.643 |
+
+- **Longer baselines make GT ranking MONOTONICALLY WORSE**, not better. The slow-drift gain is
+  swamped by accumulating LK-tracking noise + sheet non-rigidity leaking into the residual floor.
+  GT-detection stays flat (~0.83/0.90) but the *ranking* erodes.
+- **The 1-frame baseline is already optimal for the flow-outlier channel.** No baseline-stacking of
+  flow helps. Closes the "longer/accumulated independent motion" idea from the signal side.
+
+## Temporal-feature learning dead end (experiment 2a — gated and killed 2026-06-15)
+
+Premise of a temporal-stack detector: the real shape is discriminable from its motion HISTORY, not a
+single frame. Tested cheaply BEFORE any retrain with a numpy logistic regression over per-box CAUSAL
+temporal features (saliency-mass history mean/max/slope over W=8, rigid-residual history, conf-rank,
+chain length), trained **leave-one-clip-out**, vs the instantaneous mass baseline (= field's signal).
+Gate `ld/detect/temporal_gate.py`, run then removed; **7199 GT-labeled frames** available (the green
+cursor labels the real shape every frame — ample training data, NOT the blocker).
+
+| metric | mass-only (field signal) | learned temporal | Δ |
+|---|---|---|---|
+| mean top-1 | 0.579 | 0.519 | **−0.060** |
+| mean top-3 | 0.857 | 0.862 | +0.005 (noise) |
+| **t5 top-3** | 0.823 | 0.798 | **−0.026** |
+| **t8 top-3** | 0.761 | 0.718 | **−0.043** |
+
+- **No held-out lift; flat-to-negative on the laggards.** The model HAS `m0` (instantaneous mass) as
+  an input yet scores *worse* top-1 than mass alone — meaning the temporal features are net noise that
+  overfits the training clips and misleads on held-out clips. The history carries no clip-transferable
+  discriminative signal.
+- **Falsifies the temporal-stack retrain (2b) premise for ~80 lines, no GPU.** A 3-frame-stack YOLO
+  would learn the same thing the logreg did: help strong clips, not the laggards, net ~0 held-out.
+  Do not retrain on temporal context expecting a laggard win.
+
+## Acquisition/lock probe (orthogonal-bug scan — 2026-06-15)
+
+Scanned lock + early-track + recovery quality (`ld/detect/lock_probe.py`, run then removed) to rule out
+a cheap acquisition fix. **Lock is healthy on 8/10 clips** (GT inside lock box, 0.03–0.58r) INCLUDING
+both laggards (t5 0.33r, t8 0.58r) — so the laggard loss is confirmed **mid-clip creep, not a bad
+handoff** (t5 early[20]=0.40 holds only 8f; t8 early[20]=1.0 holds 72f then recovery only 0.493). Two
+findings: (a) **t1 and t4 have a BROKEN lock** — lands on the wrong shape (2.04r / 2.57r, gt_in_box=
+False) yet reacquire rescues them to 0.70/0.69 overall. This is a real, isolated, orthogonal bug worth
+a cheap fix (leaves points on t1/t4), NOT the laggard lever. (b) the **recovery** column (within_r after
+first loss) is lowest on t8 (0.493) and t6 (0.643) — reacquire-to-global-peak often doesn't find its
+way back, but that loops to the signal wall (peak saliency ≠ real shape on those frames).
+
+### Synthesis across the 2026-06-15 step-out (4 cheap experiments)
+
+Envelopment, multi-baseline flow, temporal-feature learning, and acquisition all converge on one
+conclusion, stronger than "diminishing returns": **on the weak clips (t5, t8) the real shape is NOT
+discriminable from any motion-derived signal we can construct** — instantaneous, multi-baseline,
+temporal-history, or learned. The GT box sits at top-3 ≈ 0.69–0.76 mass and no transform separates it
+from its real neighbours. This is an **identifiability limit, not an engineering gap**: `field_lag`'s
+0.72 is at the achievable ceiling of the motion channel. The only thing that could move t5/t8 is
+**non-motion-derived evidence** — and appearance (the obvious candidate) was already shown
+regime-coupled with no causal key. Remaining concrete TODO with positive EV: the **t1/t4 lock bug**
+(orthogonal points), not another signal/decision recombination.
+
 ## fpath: causal path integrator (`track_fused_path_identity`, mode `fpath`)
 
 Built from the Viterbi-ceiling insight. Forward Viterbi trellis over YOLO boxes,
@@ -397,23 +533,58 @@ candidate routing signals fail. The ~0.83 is a diagnostic ceiling, not a target.
 
 ## Open avenues (highest-EV first), all online-compatible
 
-0. **★ Fixed-lag smoother (K≈15)** — **the current frontier** (promoted after
-   box-residual dead-ended, see below). The ONLY proven-positive unbuilt lever:
-   Viterbi sweep measured K=0→K=15 = **+0.03** (0.724→0.753), and ~10–15 frames lag is
-   physically free (shape can't leave its radius that fast). Legitimately online (hold
-   K frames, emit t−K). Modest but real and dilution-free — measured, not hoped. We
-   measured the ceiling but never shipped the smoother into `field`/`fpath`.
-1. **Fixed-lag (K≈15) integration ceiling** — *diagnostic, DONE.* (the measurement
-   behind avenue #0; +0.03 K=0→K=15).
-~~Box-level rigid residual (signal)~~ — **DEAD, see "Box-residual dead end" below.**
-   The residual is weak per-frame AND not preferentially complementary to flow; it
-   attacks per-frame availability (already 0.886, well above field's 0.714) not the
-   binding integration-capture gap.
-~~Regime router (field⇄fpath)~~ — **DEAD, see "Router dead end" above.** No causal
-   signal exploits the ~0.83 oracle. Do not rebuild without a genuinely new signal.
-~~Rotation as a SELECTOR~~ — **DEAD, see "Rotation-selector dead end" below.** Rotation
-   is NOT preferentially complementary on field's misses (on-miss top1 lift +0.005) and
-   has no causal confidence key; the "rescues t3/t8" claim was not supported by data.
+**SUPERSEDED 2026-06-15 (coherence win).** The prior conclusion below — "every signal
+avenue exhausted, t5–t8 is an identifiability limit" — was FALSE. It rested on the
+hidden assumption that the motion channel = saliency *magnitude*. The **directional
+coherence of the residual vectors** (a channel `saliency_map` discards) broke it:
+`field_coh` is now the default at in-sample 0.742 / gate-LOO 0.7442 (+0.021 over
+field_lag), helps every clip, biggest gain on t5. The lesson: "exhausted" meant
+exhausted *for the magnitude derivation*; a different derivation of the same flow had
+untapped signal. **The current frontier is the coherence headroom + the t1/t4 lock bug.**
+
+0. **Coherence far-jump override** — **SHIPPED** as `field_coh` (the default). Captures the
+   escape-from-lock-in slice via a binary far-jump gate. **Still open within it:** the probe
+   shows the ungated coherent challenger is on-GT 50% of remaining-wrong frames, almost all
+   OUTSIDE the snap radius. The binary override only skims this. **Next highest-EV build: a
+   coherence SALIENCY CHANNEL** — fold coherent-mass into the saliency map the tracker +
+   reacquire consume, so *reacquire can teleport to the coherent peak* (it jumps far, unlike
+   the snap). Target ~0.79–0.82 (the 50% headroom). More invasive (touches coast/reacquire
+   dynamics); guard LOO with no regression. The local **snap-weight blend FAILED** (see
+   "Snap-weight blend dead end") — must be a far-reaching mechanism.
+1. **Fixed-lag smoother (K=8)** — **SHIPPED** as `field_lag`; now wrapped by `field_coh`.
+2. **t1/t4 lock bug** — *orthogonal, positive EV, unbuilt.* The countdown lock lands on the
+   wrong shape on t1 (2.04r) and t4 (2.57r) — `compute_countdown_lock`/`_pick_lock_box`.
+   Reacquire currently rescues both to ~0.70, but a correct lock leaves points on the table.
+   Does NOT touch the laggard (t5/t8) wall. See "Acquisition/lock probe".
+~~Box-level rigid residual (signal)~~ — **DEAD** ("Box-residual dead end").
+~~Multi-baseline / accumulated independent motion (signal)~~ — **DEAD** ("Multi-baseline
+   optical-flow dead end"): longer flow baselines rank GT monotonically WORSE; 1-frame is optimal.
+~~Temporal-stack / temporal-history detector (signal)~~ — **DEAD** ("Temporal-feature learning
+   dead end"): learned LOO model over motion history gives no held-out lift, negative on t5/t8.
+~~Regime router (field⇄fpath)~~ — **DEAD** ("Router dead end"). No causal key for the ~0.83 oracle.
+~~Rotation as a SELECTOR~~ — **DEAD** ("Rotation-selector dead end").
+~~Appearance channel (NCC / log-polar)~~ — **DEAD** ("Appearance-channel gate"): regime-coupled,
+   no causal key.
+
+**Revised binding limiter:** NOT an identifiability limit. On t5/t8 the real shape IS
+separable from its neighbours by residual-vector *coherence* (a direction-aware motion
+signal), which all prior tests — magnitude-only — missed. The remaining gap is a
+*mechanism* gap (the override can't reach far-jump frames the snap can't see), not a
+signal gap. Build the coherence saliency channel before declaring the channel done.
+
+## Snap-weight blend dead end (option 1 — built and killed 2026-06-15)
+
+The obvious first integration of coherence — reweight the field **snap** to pick
+`argmax mass·(1+λ·coherence)` among boxes in the snap radius — gives **EXACTLY ZERO
+change** (t5/t2 flip count = 1 frame). Wired as `FIELD_COH_LAMBDA`/`_box_coherent_mass`
+in identity.py (left inert, λ=0 default); sweep via `coh_sweep.py`. Root cause **measured,
+not theorized**: the snap only considers boxes within ~74px (1.3·radius); >1 box is in
+range on just 55/644 t5 frames, so there's rarely a competitor for coherence to prefer.
+And the recoverable signal is NOT local — on t5's 321 wrong frames the most-coherent
+on-GT box is OUTSIDE the snap radius **190×** vs INSIDE only **4×** (t8: 118/8). The
+coherence signal is an escape-from-lock-in cue (the real shape is FAR from the drifted
+tracker), which is exactly why the **far-jump override** (`field_coh`) works and a local
+snap blend cannot. **Lesson: any mechanism capturing this signal must be able to jump far.**
 
 ## Viterbi-ceiling result (`ld/detect/viterbi_ceiling.py` → `VITERBI_CEILING.md`)
 
@@ -459,8 +630,8 @@ blends most with fakes there. Strong clips for regression-guarding: t2 (0.87), t
 
 | File | Role |
 |------|------|
-| `ld/detect/identity.py` | All identity modes; `track_field_lag_identity` (the leader/default), `track_field_identity` (its underlying signal), `_dispatch_mode`, `ALL_MODES`, `run_clip`. |
-| `ld/vision/motion.py` | `estimate_motion` (rigid RANSAC + outliers), `saliency_map`. The per-frame signal source. |
+| `ld/detect/identity.py` | All identity modes; `track_field_coh_identity` (the leader/default — field_lag + coherence far-jump override), `track_field_lag_identity` (the smoother layer), `track_field_identity` (the underlying signal), `_box_coherent_mass`, `_dispatch_mode`, `ALL_MODES`, `run_clip`. |
+| `ld/vision/motion.py` | `estimate_motion` (rigid RANSAC + outliers), `saliency_map`. The per-frame signal source. `MotionField.outlier_vectors` exposes the residual VECTORS (direction), which `saliency_map` discards — the coherence channel's input. |
 | `ld/track/tracker.py` | `OutlierTracker` — gated CV peak-follower with reacquire. |
 | `ld/vision/cursor.py` | GT green-crosshair detect + `strip_pointer` inpainting. |
 | `ld/detect/eval_modes.py` | Leaderboard harness → `LEADERBOARD.md`. |

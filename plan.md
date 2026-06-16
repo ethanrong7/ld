@@ -1,85 +1,67 @@
-# plan.md — Findings summary: the `field_lag` fixed-lag confirmation smoother
+# Plan — Coherent-mass: the untapped signal that separates real from fake on t5/t8
 
-This file recorded the implementation plan for the fixed-lag confirmation smoother.
-The work is **done, validated, and shipped** (mode `field_lag`, now the default). Below
-is the summary of how we got here and what landed, for anyone picking up the thread.
+## Root cause of t5/t8 failure (re-diagnosed 2026-06-15, overturns the earlier "identifiability limit" conclusion)
 
-## Outcome (shipped)
+I probed the actual failure structure on the laggards. **The earlier conclusion in CLAUDE.md — that t5/t8 are an "identifiability limit" where no motion signal separates the real shape — was wrong.** The new evidence:
 
-`field_lag` is the new leader and default identity tracker.
+1. **The failure is NOT creep, and NOT a missing signal.** On t5/t8, when `field_lag` is wrong it is wrong by **median 180–200 px (3–4 shape radii)**, in long **confident blocks** (median 19–28 frames, up to 86), in `track` state (not `reacquire`). field **confidently locks onto a fake shape and tracks it for dozens of frames**. (36% of t5 frames, 40% of t8 are "oracle-hit but field-miss" = a box is on the real shape but field is elsewhere.)
 
-| metric | `field` (old default) | `field_lag` (new default) |
-|---|---|---|
-| in-sample within_r (t1–t10) | 0.714 | **0.721** |
-| **LOO held-out within_r** | 0.693 | **0.721** (+0.028) |
+2. **The real shape's signal IS present on those exact frames.** On the fake-locked frames, the GT box is the **#1 instantaneous-saliency box 33–44%** of the time and **top-3 ~74–82%**. field's single CV-gated track is simply locked 180 px away and never reconsiders the strong evidence elsewhere.
 
-- Winning config `lag_k=8, confirm=0.5` was selected by **all 10 LOO folds** (optimism
-  gap 0.000 — generalizes, does not overfit the t-set).
-- **No per-clip regression** beyond noise (worst t6 −0.004, t8 −0.003); gains up to
-  +0.017 (t3, t10).
-- `field` baseline left byte-identical (verified t2 0.873, t5 0.409, t7 0.796,
-  t8 0.589) so the A/B and the 0.714/0.693 baseline remain valid.
+3. **Why every prior fix failed:** instantaneous saliency mass at the GT box beats the fake field is locked onto only **~50% (a coin-flip)**. So "switch to global-max mass" (router, fpath, prox-fusion) is pure noise on the confusable frames — confirmed by the whole dead-end list. **The scalar field uses (instantaneous outlier-density mass) genuinely cannot separate them.**
 
-## What it does (mechanism)
+**So the binding limiter is: a strong but ambiguous instantaneous signal, integrated by a single locked track that has no mechanism to re-evaluate a competing candidate that sustains coherent evidence.**
 
-`field_lag` is a thin post-processor over `field`'s per-frame box-pick sequence. It
-**defers committing a pick until an 8-frame lookahead confirms the same box** is field's
-choice in ≥50% of the window; otherwise it emits field's pick unchanged (do-no-harm). It
-emits frame `t−K`, so it is legitimately online (a fixed lag, never unbounded future
-access). The ~8–12 frame lag is physically free: the real shape moves median 1.3 px/frame
-(p99 17.8) with radius ~56, so it cannot leave its own radius in that window (CLAUDE.md
-"Latency budget").
+## The untapped signal: directional + temporal coherence of the outlier field
 
-This directly attacks the diagnosed failure mode — **creep**: a transient single-frame
-slide onto an adjacent fake that poisons the constant-velocity estimate and locks in the
-error. The confirmation buffer outvotes a 1–2 frame creep blip before it can corrupt the
-velocity. The +0.03 magnitude matches the Viterbi-ceiling lookahead bound (K=0 0.724 →
-K=15 0.753).
+`ld/vision/motion.py` `saliency_map` (lines 90–93) stamps only the **magnitude** of each motion-outlier feature, discarding its **direction**. But the real shape's defining physics is *rigid independent translation*: its outlier vectors all point the **same way** (coherent), and that direction **persists across frames**. A fake's spurious outliers (LK noise, occlusion/relief edges) point every which way and don't persist. **Every channel ever tried — outlier density, box-rigid residual, rotation, NCC/log-polar appearance — is a magnitude or a single-frame quantity. None used directional coherence, and none accumulated it over time.**
 
-## Code changes (all committed)
+I defined **accumulated coherent-mass** per box over a causal window W:
+- per frame, per box: `coherent_mass = ||Σ resid_vectors|| · (||Σ resid_vectors|| / Σ||resid_vectors||)` — the resultant of the outlier vectors inside the box, weighted by their directional coherence (0..1). Incoherent jitter cancels in the sum; coherent drift survives.
+- accumulate that over the last W≈12 frames at the box's current location.
 
-- `ld/config.py` — `FIELD_LAG_K=8`, `FIELD_LAG_CONFIRM=0.5` (the LOO-selected winner).
-- `ld/detect/identity.py` — `track_field_lag_identity` (the wrapper); an inert
-  `chosen_centroids` out-param on `track_field_identity` (keeps `field` byte-identical);
-  `field_lag` registered in `ALL_MODES` and `_dispatch_mode`; `run_clip` default →
-  `"field_lag"`.
-- `ld/detect/loo.py` — added a `--mode field_lag` grid (`lag_k × confirm`); original
-  `field` grid kept intact for baseline reproducibility.
-- `ld/detect/LEADERBOARD.md` — regenerated on the full t1–t10 set; `field_lag` rank 1.
+### Measured result (on field's fake-locked miss frames — the frames that matter)
 
-## How we got here (the reasoning arc)
+| signal | t5 top1 | t5 top3 | t8 top1 | t8 top3 |
+|---|---|---|---|---|
+| instantaneous mass (what field uses) | 0.33 | 0.82 | 0.44 | 0.74 |
+| outlier-vector coherence (1 frame) | 0.45 | 0.70 | 0.40 | 0.67 |
+| windowed-accum mass (magnitude only) | 0.28 | 0.89 | 0.41 | 0.75 |
+| **accumulated coherent-mass (W=12)** | **0.73** | **0.86** | **0.41** | **0.70** |
 
-The bottleneck is identity/discrimination, not detection (oracle ~0.93). The failure is
-**creep, not jump** (confirmed from traces). A series of avenues were each killed cheaply
-by a pre-build "gate" before committing to an implementation — the discipline that kept
-this from burning effort:
+On strong-clip miss frames it also holds (t2 0.86, t7 0.69, t10 0.47) — not a t5 fluke, not a trivial GT bias.
 
-1. **Output-side fixes** (velocity cap, confirm-gate) — FAILED; they fight jumps, but the
-   failure is creep.
-2. **Proximity-fused emission** (`fpath` prox_w>0) — FAILED; CV prior reinforces lock-in.
-3. **field⇄fpath router** (3 forms: per-clip regime, per-frame agreement, fpath margin) —
-   all FAILED; the ~0.83 oracle has no causal key. (CLAUDE.md "Router dead end".)
-4. **Box-rigid residual signal** — FAILED; weak per-frame AND not complementary to flow;
-   flow's top-3 availability is already 0.886, so the gap is integration, not signal.
-   (CLAUDE.md "Box-residual dead end".)
-5. **Successful-example video** (`data/successful_examples/…`, local-only) — a third party
-   tracks the real shape through full camouflage. A two-part gate established the key
-   mechanism: **trajectory-continuity is a 0.987 per-step cue WHEN anchored to truth**
-   (saliency only 0.78), **but a trajectory-LED tracker collapses to 0.157** (error
-   accumulation — one wrong pick poisons the velocity, no recovery). `field` already has
-   the right architecture (saliency-led + CV gate). The lever is therefore to **protect
-   the trajectory anchor from the first wrong step**, not to add signal or change the
-   leader — which is exactly the fixed-lag confirmation buffer.
+### The causal key (what every prior signal lacked)
 
-Detailed dead-end records live in `CLAUDE.md` (the canonical project doc) and the
-auto-memory notes. The one-off gate scripts (`router_signal`, `router_agreement`,
-`resid_complement`, `traj_gate`) were deleted after their findings were recorded.
+The signal's own **margin** (top score vs runner-up, normalized) separates correct from incorrect picks by **+0.19 (t5), +0.21 (t8), +0.30 (t1), +0.36 (t4)** — high margin ⇒ more often correct, the *right* direction. fpath's path-margin was anti-correlated (conviction = lock-in); this is the opposite. **This is the first candidate signal with a usable live confidence**, so it can arbitrate online rather than being an unreachable oracle (the router dead end).
 
-## Guardrails for future work (do not re-attempt)
+## Implementation strategy
 
-- No velocity/speed cap on emitted position (failed smoother).
-- No prediction-led pick (the 0.157 collapse).
-- No proximity/CV-term fusion into an emission (`fpath` dilution).
-- No unbounded lookahead — keep the lag fixed (≤ ~15) so it stays online.
-- Always quote LOO, not in-sample, as the real metric; accept changes only on a held-out
-  win with no per-clip regression.
+Add accumulated coherent-mass as a **second opinion that can break field's lock**, gated by its causal margin key — NOT a replacement leader (avoids the 0.157 trajectory-led collapse), NOT an emission fusion into field's CV model (avoids the prox-fusion dilution).
+
+### Stage 1 — full pre-build gate (read-only, ~150 lines, no retrain)
+Before touching `field`, prove the end-to-end win with a gate that:
+1. Computes accumulated coherent-mass per box per frame for all 10 clips (re-runs flow; ~3 min/clip — reuse the `estimate_motion` internals but keep residual *vectors*, which `motion.py` currently discards).
+2. Defines a **challenger rule**: when the coherent-mass leader is a box far from field's current pick AND its margin key exceeds a threshold τ for ≥C consecutive frames, override field's pick to the challenger.
+3. Sweeps (τ, C, W) and scores real `within_r` through `score_identity`, **leave-one-clip-out**.
+4. **Accept only if LOO mean improves with no per-clip regression > 0.004** (the project bar). Guard t2/t7 (strong) explicitly.
+
+If Stage 1 fails the bar, it dies for ~150 lines like every other gate, and the identifiability conclusion is *re-confirmed* from a new angle. If it clears, proceed.
+
+### Stage 2 — productionize into the signal source
+1. Extend `ld/vision/motion.py`: have `MotionField`/`estimate_motion` retain per-outlier **residual vectors** (currently only magnitudes survive into `outlier_weights`), and add a `coherent_mass_map` or a per-box helper. Keep `saliency_map` byte-identical so `field` is unchanged and the A/B baseline holds.
+2. Add the challenger-override into `track_field_identity` (or a thin wrapper `field_coh` mode, mirroring how `field_lag` wraps `field`) behind config flags, dispatched via `_dispatch_mode`, registered in `ALL_MODES`. Default stays `field_lag` until the new mode wins LOO.
+3. Re-run `loo.py` + `eval_modes.py`; update `LEADERBOARD.md` only on a held-out win.
+
+### Composability with field_lag
+The challenger-override operates on the pick sequence, so it composes with the shipped fixed-lag confirmation (`field_lag`). Likely final form: `field` → coherent-mass challenger → fixed-lag confirm. Validate the stack end-to-end in Stage 1.
+
+## Key files
+- `ld/vision/motion.py` — `estimate_motion` discards residual *vectors* (line 81 keeps only magnitudes); this is the change to expose direction. `saliency_map` lines 85–96.
+- `ld/detect/identity.py` — `track_field_identity` (1060), snap/pick at 1133–1148; `_box_saliency_mass` (1051); `_dispatch_mode`/`ALL_MODES`.
+- `ld/detect/eval_modes.py`, `ld/detect/loo.py` — scoring harnesses.
+
+## Risks / kill-criteria
+- **t8 is weaker** (top1 0.41, not 0.73). The override must help t5 without hurting t8; if the margin gate can't be tuned to do both LOO, ship t5-only behavior only if no t8 regression.
+- **Override could destabilize strong clips** (t2/t7) by second-guessing a correct lock. The margin key + consecutive-frame requirement C is the guard; Stage 1 must show strong clips flat.
+- If LOO doesn't clear +0 with no regression, **do not ship** — record as the definitive test of the coherence channel and revert to `field_lag`.
