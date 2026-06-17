@@ -1425,6 +1425,9 @@ FPATH_PROX_W = 0.0        # weight on CV-proximity emission (0 = pure mass; prox
 FPATH_PROX_SIGMA = 0.6    # proximity gaussian width in radii
 FPATH_VEL_DAMP = 0.7      # CV prediction velocity damping (matches tracker VEL_DAMP)
 FPATH_MASS_EMA = 0.98     # running-scale EMA for absolute mass normalization
+FPATH_REACQUIRE_PATIENCE = 8    # frames off-track before teleport to global mass peak
+FPATH_REACQUIRE_MASS_FRAC = 0.3 # min normalised mass for reacquire target (do-no-harm gate)
+FPATH_TRANS_CAP = 8.0     # cap on transition penalty in radii² — limits lock-in depth
 
 
 def track_fused_path_identity(clip: str | Path, packs: list[FusionPack],
@@ -1436,6 +1439,8 @@ def track_fused_path_identity(clip: str | Path, packs: list[FusionPack],
                               prox_sigma: float = FPATH_PROX_SIGMA,
                               vel_damp: float = FPATH_VEL_DAMP,
                               mass_ema: float = FPATH_MASS_EMA,
+                              reacquire: bool = False,
+                              trans_cap: float | None = None,
                               ) -> tuple[list[TrackPoint], list[int | None], int, float]:
     """Causal Viterbi-style integrator fusing saliency mass + CV-proximity prior.
 
@@ -1460,6 +1465,7 @@ def track_fused_path_identity(clip: str | Path, packs: list[FusionPack],
     prev_alpha: np.ndarray | None = None
     prev_gray: np.ndarray | None = None
     active = False
+    lost = 0        # frames since last trusted Viterbi pick
     mass_scale = 0.0   # running EMA of per-frame peak absolute mass (cross-frame conf)
 
     track: list[TrackPoint] = []
@@ -1517,19 +1523,36 @@ def track_fused_path_identity(clip: str | Path, packs: list[FusionPack],
                     best = -1e18
                     for j, (px, py) in enumerate(prev_cents):
                         dd = math.hypot(cx - px, cy - py) / radius
-                        v = prev_alpha[j] - trans_w * dd * dd
+                        cost = trans_w * dd * dd
+                        if trans_cap is not None:
+                            cost = min(cost, trans_cap)
+                        v = prev_alpha[j] - cost
                         if v > best:
                             best = v
                     alpha[i] = best + emis[i]
             # global re-centering: keep alpha bounded (subtract max), no decision change
             alpha = alpha - float(alpha.max())
             choice = int(np.argmax(alpha))
+            # Reacquire: if off-track for long enough, override Viterbi with global
+            # mass peak (same teleport logic as OutlierTracker). Only fires when a
+            # trustworthy target exists (mass gate). Resets path memory on teleport.
+            if reacquire and lost >= FPATH_REACQUIRE_PATIENCE:
+                best_mass_idx = int(np.argmax(mass))
+                if mass_scale > 0 and mass[best_mass_idx] >= FPATH_REACQUIRE_MASS_FRAC:
+                    choice = best_mass_idx
+                    prev_alpha, prev_cents = None, None
+                    vel[:] = 0.0
             nx, ny = cents[choice]
             vel = vel_damp * vel + (1.0 - vel_damp) * (np.array([nx, ny], np.float32) - pos)
             x, y, state = nx, ny, "track"
             prev_alpha, prev_cents = alpha, cents
+            lost = 0
         else:
+            # Coast: advance via CV prediction, wipe trellis (no boxes to anchor)
+            pos = pos + vel
+            vel = vel * vel_damp
             prev_alpha, prev_cents = None, None
+            lost += 1
 
         if fw is not None:
             x = float(np.clip(x, 0, fw - 1))
@@ -1661,7 +1684,7 @@ _PAPER_PICK_MODES = (
 
 # All selectable modes, in leaderboard order. Single source of truth shared by
 # run_clip's argparse and the eval_modes harness so the two never drift.
-ALL_MODES = ("chain", *_PAPER_PICK_MODES, "outlier", "accum", "field", "field_lag", "field_coh", "fpath")
+ALL_MODES = ("chain", *_PAPER_PICK_MODES, "outlier", "accum", "field", "field_lag", "field_coh", "fpath", "fpath_reacq")
 
 
 def _dispatch_mode(clip: Path, packs: list[FusionPack], lock: LockInfo | None,
@@ -1684,6 +1707,12 @@ def _dispatch_mode(clip: Path, packs: list[FusionPack], lock: LockInfo | None,
         return track_field_coh_identity(clip, packs, lock, frame_wh=frame_wh)
     if mode == "fpath":
         return track_fused_path_identity(clip, packs, lock, frame_wh=frame_wh)
+    if mode == "fpath_reacq":
+        return track_fused_path_identity(clip, packs, lock, frame_wh=frame_wh,
+                                         reacquire=True,
+                                         trans_cap=FPATH_TRANS_CAP)
+        # NOTE: trans_cap=8.0 helps t4/t8 (+0.018/+0.007) but hurts t3/t5 (-0.040/-0.084)
+        # net -0.010 on all 10 clips. Same regime-coupling as prior fixes. Dead end.
     if mode == "outlier":
         from ld.detect.outlier_track import track_outlier_identity
         return track_outlier_identity(clip, packs, lock, frame_wh=frame_wh)

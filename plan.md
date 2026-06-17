@@ -1,67 +1,105 @@
-# Plan — Coherent-mass: the untapped signal that separates real from fake on t5/t8
+Session Summary & Future Recommendations
 
-## Root cause of t5/t8 failure (re-diagnosed 2026-06-15, overturns the earlier "identifiability limit" conclusion)
+What We Did This Session
 
-I probed the actual failure structure on the laggards. **The earlier conclusion in CLAUDE.md — that t5/t8 are an "identifiability limit" where no motion signal separates the real shape — was wrong.** The new evidence:
+Detection improvements (SHIPPED)
 
-1. **The failure is NOT creep, and NOT a missing signal.** On t5/t8, when `field_lag` is wrong it is wrong by **median 180–200 px (3–4 shape radii)**, in long **confident blocks** (median 19–28 frames, up to 86), in `track` state (not `reacquire`). field **confidently locks onto a fake shape and tracks it for dozens of frames**. (36% of t5 frames, 40% of t8 are "oracle-hit but field-miss" = a box is on the real shape but field is elsewhere.)
+Problem: Oracle was 0.915 on old model; t1 in particular was 0.806 because the shape drifted to the top-left edge where no training examples existed.
 
-2. **The real shape's signal IS present on those exact frames.** On the fake-locked frames, the GT box is the **#1 instantaneous-saliency box 33–44%** of the time and **top-3 ~74–82%**. field's single CV-gated track is simply locked 180 px away and never reconsiders the strong evidence elsewhere.
+Solution: Built a full annotation pipeline (annotate_s.py) supporting drag-to-draw boxes with full/partial class toggle, extracted 5 targeted frames from t1's miss cluster (f225–300, shape at top-left corner), migrated all labels to single-class, trained yolov8n_single_combined.
 
-3. **Why every prior fix failed:** instantaneous saliency mass at the GT box beats the fake field is locked onto only **~50% (a coin-flip)**. So "switch to global-max mass" (router, fpath, prox-fusion) is pure noise on the confusable frames — confirmed by the whole dead-end list. **The scalar field uses (instantaneous outlier-density mass) genuinely cannot separate them.**
+Result: Oracle improved from 0.915 → 0.974 across all 10 clips. t1 oraclemodes improved in lock-step — confirming that better detection directly lifts identity.                                                                                                                                                                         
+Key lesson: Targeted visual coverage of the specific failure position beats label schema changes at ~55 frames. Two-class (full/partial) split was tried and regressed oracle — halves instances per class.
+                                                                                                                                                                                  ---
+Identity investigation (EXHAUSTED for fpath trellis modifications)                                                                                                                
+Current best: fpath at within_r 0.855 (LOO). Laggards: t4 (0.729) and t8 (0.664).
 
-**So the binding limiter is: a strong but ambiguous instantaneous signal, integrated by a single locked track that has no mechanism to re-evaluate a competing candidate that sustains coherent evidence.**
+fpath_reacq experiment (DEAD END):                                                                                                                                                - Added CV coast during detection gaps + reacquire teleport after 8 off-to limit trellis lock-in depth
+- Narrow sweep on t4/t8 looked promising (t4 +0.018, t8 +0.007)                                                                                                                   - Full 10-clip run: fpath_reacq 0.845 vs fpath 0.855 (net −0.010)
+- Killer: t3 −0.040, t5 −0.084. On t5 at f295, trans_cap allows path to relax and a high-saliency distant fake wins (266px teleport). Regime-coupling: the cap that rescues t4/t8 destabilises t3/t5.
+- Root cause: no new signal introduced — trans_cap just changes which box wins under the same saliency signal. Without a discriminating signal on the hard frames, any relaxation of path continuity is a coin flip.
 
-## The untapped signal: directional + temporal coherence of the outlier field
+Why fpath can't be improved by trellis tuning alone:
+On t4/t8 failure frames, the real shape has weaker saliency than a neighbouring fake. No Viterbi parameter changes what emission scores — they only decide how to weight path history vs current observation. Once the wrong box has higher mass, Viterbi will prefer it regardless of trans_cap.
 
-`ld/vision/motion.py` `saliency_map` (lines 90–93) stamps only the **magnitude** of each motion-outlier feature, discarding its **direction**. But the real shape's defining physics is *rigid independent translation*: its outlier vectors all point the **same way** (coherent), and that direction **persists across frames**. A fake's spurious outliers (LK noise, occlusion/relief edges) point every which way and don't persist. **Every channel ever tried — outlier density, box-rigid residual, rotation, NCC/log-polar appearance — is a magnitude or a single-frame quantity. None used directional coherence, and none accumulated it over time.**
+---
+Failure Mode Taxonomy (t4/t8)
 
-I defined **accumulated coherent-mass** per box over a causal window W:
-- per frame, per box: `coherent_mass = ||Σ resid_vectors|| · (||Σ resid_vectors|| / Σ||resid_vectors||)` — the resultant of the outlier vectors inside the box, weighted by their directional coherence (0..1). Incoherent jitter cancels in the sum; coherent drift survives.
-- accumulate that over the last W≈12 frames at the box's current location.
+┌──────┬──────────────────────────┬────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│ Clip │       Failure type       │                                                             Root cause                                                             │
+├──────┼──────────────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ t4   │ Creep (f107)             │ Real shape has lower saliency than adath creeps one box over, path memory holds it off for 90+ frames │
+├──────┼──────────────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ t8   │ Detection gap (f232–239) │ Oracle drops to 0 for 8 frames; trellg box                                                            │
+└──────┴──────────────────────────┴────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 
-### Measured result (on field's fake-locked miss frames — the frames that matter)
+---
+What's Left (Highest-EV First)
 
-| signal | t5 top1 | t5 top3 | t8 top1 | t8 top3 |
-|---|---|---|---|---|
-| instantaneous mass (what field uses) | 0.33 | 0.82 | 0.44 | 0.74 |
-| outlier-vector coherence (1 frame) | 0.45 | 0.70 | 0.40 | 0.67 |
-| windowed-accum mass (magnitude only) | 0.28 | 0.89 | 0.41 | 0.75 |
-| **accumulated coherent-mass (W=12)** | **0.73** | **0.86** | **0.41** | **0.70** |
+1. Coherence saliency channel (best unbuilt lever)
 
-On strong-clip miss frames it also holds (t2 0.86, t7 0.69, t10 0.47) — not a t5 fluke, not a trivial GT bias.
+What: Fold directional coherence of residual optical-flow vectors into the saliency map. Currently saliency_map (in ld/vision/motion.py) uses only outlier magnitude. The real
+shape's residual vectors should point coherently (it moves independently,t the same direction relative to the sheet). Fakes' residual vectors are
+noise.
 
-### The causal key (what every prior signal lacked)
+Why promising:
+- field_coh already uses coherence as an override (far-jump trigger after 8 coherent frames) and it works — it's the reason field_coh beats field. But the override only fires on
+already-large errors, not on first-creep.
+- Folding coherence directly into the saliency map means fpath's emission scores would reflect coherence on every frame, not just as an escape valve.
+- Memory index entry ld-coherence-override-win.md notes: "ungated challenger on-GT 50.2% of still-wrong+silent frames (t5 0.556!) → override is WRONG shape;
+NEXT=coherence-weighted EMISSION integrator"
 
-The signal's own **margin** (top score vs runner-up, normalized) separates correct from incorrect picks by **+0.19 (t5), +0.21 (t8), +0.30 (t1), +0.36 (t4)** — high margin ⇒ more often correct, the *right* direction. fpath's path-margin was anti-correlated (conviction = lock-in); this is the opposite. **This is the first candidate signal with a usable live confidence**, so it can arbitrate online rather than being an unreachable oracle (the router dead end).
+How: In saliency_map or a wrapper, compute per-box coherence score (mean cosine similarity of inlier residual vectors within each YOLO box), multiply into box mass before passing to fpath's emission. The coherence score is already computed in motion.py's MotionField.outlier_vectors — it just needs to be exposed at the box level.
 
-## Implementation strategy
+Files: ld/vision/motion.py (expose outlier_vectors), ld/detect/identity.py (blend coherence into mass for fpath emission), ld/detect/fusion.py (pass coherence through FusionPack
+if needed).
 
-Add accumulated coherent-mass as a **second opinion that can break field's lock**, gated by its causal margin key — NOT a replacement leader (avoids the 0.157 trajectory-led collapse), NOT an emission fusion into field's CV model (avoids the prox-fusion dilution).
+Expected lift: +0.05–0.08 per memory index (ld-coherence-override-win.md estimated this range). Would push toward ~0.91–0.93.
 
-### Stage 1 — full pre-build gate (read-only, ~150 lines, no retrain)
-Before touching `field`, prove the end-to-end win with a gate that:
-1. Computes accumulated coherent-mass per box per frame for all 10 clips (re-runs flow; ~3 min/clip — reuse the `estimate_motion` internals but keep residual *vectors*, which `motion.py` currently discards).
-2. Defines a **challenger rule**: when the coherent-mass leader is a box far from field's current pick AND its margin key exceeds a threshold τ for ≥C consecutive frames, override field's pick to the challenger.
-3. Sweeps (τ, C, W) and scores real `within_r` through `score_identity`, **leave-one-clip-out**.
-4. **Accept only if LOO mean improves with no per-clip regression > 0.004** (the project bar). Guard t2/t7 (strong) explicitly.
+---
+2. t1/t4 lock bug (orthogonal, concrete)
 
-If Stage 1 fails the bar, it dies for ~150 lines like every other gate, and the identifiability conclusion is *re-confirmed* from a new angle. If it clears, proceed.
+What: Countdown lock (compute_countdown_lock / _pick_lock_box in identity.py) lands on the wrong shape at game start for t1 and t4 (2.04r / 2.57r error). Reacquire masks it to ~0.70 but the initial lock is provably wrong.
 
-### Stage 2 — productionize into the signal source
-1. Extend `ld/vision/motion.py`: have `MotionField`/`estimate_motion` retain per-outlier **residual vectors** (currently only magnitudes survive into `outlier_weights`), and add a `coherent_mass_map` or a per-box helper. Keep `saliency_map` byte-identical so `field` is unchanged and the A/B baseline holds.
-2. Add the challenger-override into `track_field_identity` (or a thin wrapper `field_coh` mode, mirroring how `field_lag` wraps `field`) behind config flags, dispatched via `_dispatch_mode`, registered in `ALL_MODES`. Default stays `field_lag` until the new mode wins LOO.
-3. Re-run `loo.py` + `eval_modes.py`; update `LEADERBOARD.md` only on a held-out win.
+Why: _pick_lock_box picks the highest-saliency box at lock time. On t1/t4, the real shape is not the highest-saliency box at countdown end — it may be partially obscured or near
+an edge.
 
-### Composability with field_lag
-The challenger-override operates on the pick sequence, so it composes with the shipped fixed-lag confirmation (`field_lag`). Likely final form: `field` → coherent-mass challenger → fixed-lag confirm. Validate the stack end-to-end in Stage 1.
+Fix direction: Look at what box is selected vs GT at lock time. May be a hape ranks 10–13), or a spatial bias issue (lock picks center of mass of allboxes, not GT-nearest). Low-risk change, orthogonal to the saliency signal problem.
 
-## Key files
-- `ld/vision/motion.py` — `estimate_motion` discards residual *vectors* (line 81 keeps only magnitudes); this is the change to expose direction. `saliency_map` lines 85–96.
-- `ld/detect/identity.py` — `track_field_identity` (1060), snap/pick at 1133–1148; `_box_saliency_mass` (1051); `_dispatch_mode`/`ALL_MODES`.
-- `ld/detect/eval_modes.py`, `ld/detect/loo.py` — scoring harnesses.
+Expected lift: ~+0.03–0.05 on t1/t4 specifically (removes a handicap that compounds through the whole clip).
 
-## Risks / kill-criteria
-- **t8 is weaker** (top1 0.41, not 0.73). The override must help t5 without hurting t8; if the margin gate can't be tuned to do both LOO, ship t5-only behavior only if no t8 regression.
-- **Override could destabilize strong clips** (t2/t7) by second-guessing a correct lock. The margin key + consecutive-frame requirement C is the guard; Stage 1 must show strong clips flat.
-- If LOO doesn't clear +0 with no regression, **do not ship** — record as the definitive test of the coherence channel and revert to `field_lag`.
+---
+3. Dense pixel differencing (exploratory, promising on t8)
+
+What: Warp previous frame → current frame by affine, compute per-pixel difference, accumulate a registered heatmap, rank YOLO boxes by pixel-mass within the heat region.
+
+Why: Memory entry ld-dense-differencing-promising.md notes this beats coherence on t8 laggard miss frames (top1 0.596 vs bar 0.70) — first signal to do so. Complementary: strong
+on t8, weak on t5. If the miss frames are disjoint from coherence misses,s the single-channel ceiling.
+
+Next step: Complementarity check — do dense-diff correct frames overlap with coherence correct frames? If largely disjoint, combine as a second emission channel in fpath.
+
+---
+Recommended Execution Order
+
+1. Coherence-weighted emission — highest EV, builds on proven signal, no
+2. Lock bug fix — concrete, low-risk, free improvement on t1/t4
+3. Dense differencing complementarity check — low cost diagnostic before
+
+Do not revisit trans_cap / fpath_reacq variants — the regime-coupling wal
+
+The plan is saved. Here's the tl;dr of this session and what I'd prioritise
+
+What we did:
+- Built the annotation toolchain and trained yolov8n_single_combined — oracle jumped from 0.915 → 0.974 by adding 5 targeted t1 edge frames. Identity within_r followed (fpath 0.855,
+up from ~0.74).
+- Investigated fpath trellis improvements (fpath_reacq with CV coast + trans4/t8 (+0.018/+0.007) but kills t3/t5 (−0.040/−0.084). Regime-coupling is
+structural: no trellis parameter changes what the emission scores, and on thsimply has weaker saliency than the winning fake.
+
+Root cause of remaining failures:
+- t4: real shape lower-saliency than adjacent fake at f107 → creep, then 90-
+- t8: detection gap (8 frames, oracle_hit=0) → trellis reset → wrong reacqui
+
+Recommended next steps (highest EV first):
+1. Coherence-weighted emission — fold directional coherence of residual flow vectors into per-box saliency scores. field_coh already proves this signal works as an override; moving it upstream into emission is the natural next step. Estimated +0.05–0.08.
+2. Lock bug fix — _pick_lock_box selects wrong shape at countdown end on t1/t4. Cheap, orthogonal.
+3. Dense differencing complementarity check — warp-and-diff was strong on t8; worth checking if it's disjoint from coherence misses before building.
