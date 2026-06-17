@@ -105,12 +105,15 @@ def render_clip(weights: str, clip: Path, *, conf: float = 0.25,
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Render field_coh evidence videos")
-    ap.add_argument("--weights", default="data/detect/runs/yolov8n_combined/weights/best.pt")
+    # Modes excluded from evidence renders — well below competitive threshold
+    EXCLUDED_MODES = {"paper", "paper_outlier", "paper_outlier_rank", "chain"}
+
+    ap = argparse.ArgumentParser(description="Render identity tracker evidence videos")
+    ap.add_argument("--weights", default="data/detect/runs/yolov8n_single_combined/weights/best.pt")
     ap.add_argument("--clips", nargs="*", default=None,
                     help="clip stems or paths (default: all t*_cropped_trimmed.mp4)")
-    ap.add_argument("--mode", default="field_coh",
-                    help="identity mode to render (default: field_coh)")
+    ap.add_argument("--mode", default="fpath",
+                    help="identity mode to render (default: fpath)")
     ap.add_argument("--conf", type=float, default=0.25)
     ap.add_argument("--imgsz", type=int, default=768)
     args = ap.parse_args()
@@ -124,6 +127,10 @@ def main() -> None:
             clips.append(p)
     else:
         clips = _default_clips()
+
+    if args.mode in EXCLUDED_MODES:
+        raise SystemExit(f"Mode '{args.mode}' is excluded from evidence renders. "
+                         f"Excluded: {sorted(EXCLUDED_MODES)}")
 
     for clip in clips:
         render_clip(args.weights, clip, conf=args.conf,

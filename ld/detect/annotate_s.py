@@ -2,8 +2,15 @@
 
 Picks 5 evenly-spaced frames per clip from the post-countdown window, strips
 the green cursor, saves them as PNGs, then opens an interactive drag-to-draw
-box annotator. All shapes are class 0 ("shape"). The centroid of each box is
-auto-calculated as its geometric centre.
+box annotator.
+
+Two classes are used:
+  class 0 — shape_full    box fully inside the frame
+  class 1 — shape_partial box touches the frame border (truncated shape)
+
+Class is assigned automatically when a box is drawn: any box whose edge is
+within BORDER_PX pixels of the frame edge becomes shape_partial. Press 't'
+to toggle the class of the last-drawn box if auto-classification is wrong.
 
 On exit writes:
   data/detect/s_frames/<clip>_<frame>.png          — cursor-stripped frames
@@ -11,7 +18,8 @@ On exit writes:
   data/detect/s_manifest.json                      — box + centroid metadata
 
 Controls:
-  left-drag     draw a new box
+  left-drag     draw a new box (auto-classified full/partial)
+  t             toggle class of the most recently drawn box
   u             undo last box
   c             clear all boxes on this frame
   n / SPACE     save + next frame
@@ -46,10 +54,18 @@ S_FRAMES_DIR = DATA_DIR / "detect" / "s_frames"
 S_LABELS_DIR = DATA_DIR / "detect" / "s_labels"
 S_MANIFEST   = DATA_DIR / "detect" / "s_manifest.json"
 
-WINDOW = "LD annotate-s  [drag=box  u=undo  c=clear  n/space=next  p=prev  s=save  q=quit]"
-DRAWN_COLOR = (0, 255, 0)    # green
-LIVE_COLOR  = (255, 160, 0)  # blue (mid-draw)
-CENTROID_COLOR = (0, 0, 255) # red dot
+WINDOW = "LD annotate-s  [drag=box  f=full-mode  x=partial-mode  t=toggle-last  u=undo  c=clear  n=next  p=prev  q=quit]"
+
+# class 0 = shape_full (fully inside frame)
+# class 1 = shape_partial (touches frame border)
+CLASS_NAMES  = {0: "full", 1: "partial"}
+CLASS_COLORS = {0: (0, 255, 0),    # green  — shape_full
+                1: (0, 140, 255)}  # orange — shape_partial
+LIVE_COLOR     = (255, 200, 0)     # cyan-ish, mid-draw
+CENTROID_COLOR = (0, 0, 255)       # red dot
+
+# Pixel distance from frame edge that makes a box "partial"
+BORDER_PX = 2
 
 
 # ---------------------------------------------------------------------------
@@ -162,6 +178,15 @@ def extract_frames(clip_path: Path, per_clip: int, out_dir: Path) -> list[dict]:
     return records
 
 
+def _auto_class(b: Box, img_w: int, img_h: int) -> int:
+    """Return 1 (partial) if any edge of the box touches the frame border."""
+    if b.x1 <= BORDER_PX or b.y1 <= BORDER_PX:
+        return 1
+    if b.x2 >= img_w - BORDER_PX or b.y2 >= img_h - BORDER_PX:
+        return 1
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # Annotator state
 # ---------------------------------------------------------------------------
@@ -172,6 +197,7 @@ class _State:
         self.drawing = False
         self.x0 = self.y0 = 0
         self.x1 = self.y1 = 0
+        self.draw_cls: int = 0  # active drawing class: 0=full, 1=partial
 
 
 def _label_path(image_name: str) -> Path:
@@ -189,23 +215,33 @@ def _draw_frame(base: np.ndarray, st: _State, rec: dict,
                 n_done: int, n_total: int) -> np.ndarray:
     img = base.copy()
     for b in st.boxes:
-        cv2.rectangle(img, (int(b.x1), int(b.y1)), (int(b.x2), int(b.y2)),
-                      DRAWN_COLOR, 2)
-        # Centroid dot
+        col = CLASS_COLORS[b.cls]
+        cv2.rectangle(img, (int(b.x1), int(b.y1)), (int(b.x2), int(b.y2)), col, 2)
         cx = int((b.x1 + b.x2) / 2)
         cy = int((b.y1 + b.y2) / 2)
         cv2.circle(img, (cx, cy), 4, CENTROID_COLOR, -1)
+        cv2.putText(img, CLASS_NAMES[b.cls], (int(b.x1) + 2, int(b.y1) + 12),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.32, col, 1)
     if st.drawing:
-        cv2.rectangle(img, (st.x0, st.y0), (st.x1, st.y1), LIVE_COLOR, 1)
-        # Live centroid preview
+        live_col = CLASS_COLORS[st.draw_cls]
+        cv2.rectangle(img, (st.x0, st.y0), (st.x1, st.y1), live_col, 2)
         lx = (st.x0 + st.x1) // 2
         ly = (st.y0 + st.y1) // 2
         cv2.circle(img, (lx, ly), 4, CENTROID_COLOR, 1)
-    hud = (f"{rec['clip']} f{rec['frame']}  boxes={len(st.boxes)}"
-           f"  [{n_done+1}/{n_total}]")
+    n_full    = sum(1 for b in st.boxes if b.cls == 0)
+    n_partial = sum(1 for b in st.boxes if b.cls == 1)
+    mode_str  = f"[MODE: {CLASS_NAMES[st.draw_cls].upper()}]"
+    hud = (f"{rec['clip']} f{rec['frame']}  "
+           f"full={n_full} partial={n_partial}  "
+           f"[{n_done+1}/{n_total}]  {mode_str}")
     cv2.rectangle(img, (0, 0), (img.shape[1], 26), (0, 0, 0), -1)
-    cv2.putText(img, hud, (8, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
-                (255, 255, 255), 1)
+    # Colour the mode indicator to match active class
+    cv2.putText(img, hud[:hud.index(mode_str)], (8, 18),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.48, (255, 255, 255), 1)
+    mode_x = int(cv2.getTextSize(hud[:hud.index(mode_str)],
+                                  cv2.FONT_HERSHEY_SIMPLEX, 0.48, 1)[0][0]) + 8
+    cv2.putText(img, mode_str, (mode_x, 18),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.48, CLASS_COLORS[st.draw_cls], 1)
     return img
 
 
@@ -217,9 +253,17 @@ def annotate(records: list[dict]) -> None:
     S_LABELS_DIR.mkdir(parents=True, exist_ok=True)
     cv2.namedWindow(WINDOW, cv2.WINDOW_NORMAL)
     st = _State()
+    # img dimensions exposed to mouse callback via mutable container
+    img_dims = [0, 0]  # [w, h]
 
     def on_mouse(event, x, y, flags, _):
         if event == cv2.EVENT_LBUTTONDOWN:
+            # Check if click lands inside an existing box — if so, toggle its class
+            for idx, b in enumerate(st.boxes):
+                if b.x1 <= x <= b.x2 and b.y1 <= y <= b.y2:
+                    st.boxes[idx] = Box(1 - b.cls, b.x1, b.y1, b.x2, b.y2)
+                    return  # consumed — don't start drawing
+            # No existing box hit — start drawing a new one
             st.drawing = True
             st.x0 = st.x1 = x
             st.y0 = st.y1 = y
@@ -228,7 +272,7 @@ def annotate(records: list[dict]) -> None:
         elif event == cv2.EVENT_LBUTTONUP and st.drawing:
             st.drawing = False
             st.x1, st.y1 = x, y
-            b = Box(0, st.x0, st.y0, st.x1, st.y1)
+            b = Box(st.draw_cls, st.x0, st.y0, st.x1, st.y1)
             if b.valid():
                 st.boxes.append(b)
 
@@ -244,6 +288,7 @@ def annotate(records: list[dict]) -> None:
             i += 1
             continue
         h, w = base.shape[:2]
+        img_dims[0], img_dims[1] = w, h
         st.boxes = _load_boxes(rec["image"], w, h)
 
         while True:
@@ -261,6 +306,13 @@ def annotate(records: list[dict]) -> None:
             elif key == ord("s"):
                 save_labels(_label_path(rec["image"]), st.boxes, w, h)
                 print(f"  saved {rec['image']} ({len(st.boxes)} boxes)")
+            elif key == ord("f"):
+                st.draw_cls = 0  # switch to full mode
+            elif key == ord("x"):
+                st.draw_cls = 1  # switch to partial mode
+            elif key == ord("t") and st.boxes:
+                b = st.boxes[-1]
+                st.boxes[-1] = Box(1 - b.cls, b.x1, b.y1, b.x2, b.y2)
             elif key == ord("u") and st.boxes:
                 st.boxes.pop()
             elif key == ord("c"):

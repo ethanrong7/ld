@@ -1,0 +1,6 @@
+# Auto-generated — single class
+path: /Users/ethanrong/Documents/Git/ld/data/detect/dataset_single_combined
+train: images/train
+val: images/val
+names:
+  0: shape
