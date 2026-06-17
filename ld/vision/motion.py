@@ -31,7 +31,7 @@ from ld.config import (
     SALIENCY_SIGMA,
 )
 
-__all__ = ["MotionField", "estimate_motion", "saliency_map"]
+__all__ = ["MotionField", "estimate_motion", "saliency_map", "box_coherence"]
 
 
 @dataclass
@@ -104,3 +104,27 @@ def saliency_map(field: MotionField, shape: tuple[int, int]) -> np.ndarray:
     if vote.max() <= 0:
         return vote
     return cv2.GaussianBlur(vote, (0, 0), SALIENCY_SIGMA)
+
+
+def box_coherence(box: tuple, field: MotionField) -> float:
+    """Mean resultant length of outlier residual vectors within a YOLO box.
+
+    Returns R in [0,1]: R=1 means all vectors aligned (real shape moves coherently),
+    R~0 means random directions (fake noise). Returns 0.0 if fewer than 2 outliers.
+    """
+    if field.outlier_vectors is None or len(field.outliers) == 0:
+        return 0.0
+    x1, y1, x2, y2 = box[0], box[1], box[2], box[3]
+    mask = (
+        (field.outliers[:, 0] >= x1) & (field.outliers[:, 0] < x2) &
+        (field.outliers[:, 1] >= y1) & (field.outliers[:, 1] < y2)
+    )
+    vecs = field.outlier_vectors[mask]
+    if len(vecs) < 2:
+        return 0.0
+    norms = np.linalg.norm(vecs, axis=1, keepdims=True)
+    valid = norms.ravel() > 1e-6
+    if valid.sum() < 2:
+        return 0.0
+    unit = vecs[valid] / norms[valid]
+    return float(np.linalg.norm(unit.mean(axis=0)))

@@ -1428,6 +1428,8 @@ FPATH_MASS_EMA = 0.98     # running-scale EMA for absolute mass normalization
 FPATH_REACQUIRE_PATIENCE = 8    # frames off-track before teleport to global mass peak
 FPATH_REACQUIRE_MASS_FRAC = 0.3 # min normalised mass for reacquire target (do-no-harm gate)
 FPATH_TRANS_CAP = 8.0     # cap on transition penalty in radii² — limits lock-in depth
+FPATH_COH_W = 0.0         # coherence emission weight; 0 = pure mass (current default)
+FPATH_COH_W_DEFAULT = 1.8 # used by fpath_coh mode; swept on all 10 clips, peak at 1.8
 
 
 def track_fused_path_identity(clip: str | Path, packs: list[FusionPack],
@@ -1441,6 +1443,7 @@ def track_fused_path_identity(clip: str | Path, packs: list[FusionPack],
                               mass_ema: float = FPATH_MASS_EMA,
                               reacquire: bool = False,
                               trans_cap: float | None = None,
+                              coh_w: float = FPATH_COH_W,
                               ) -> tuple[list[TrackPoint], list[int | None], int, float]:
     """Causal Viterbi-style integrator fusing saliency mass + CV-proximity prior.
 
@@ -1453,7 +1456,7 @@ def track_fused_path_identity(clip: str | Path, packs: list[FusionPack],
     the path stays anchored the way field's snap_feedback does -- but globally, not
     greedily.
     """
-    from ld.vision.motion import estimate_motion, saliency_map
+    from ld.vision.motion import estimate_motion, saliency_map, box_coherence
 
     clip = Path(clip)
     seed_x, seed_y, radius, start = _seed(packs)  # type: ignore[arg-type]
@@ -1509,12 +1512,16 @@ def track_fused_path_identity(clip: str | Path, packs: list[FusionPack],
             fmax = float(mass.max())
             mass_scale = fmax if mass_scale == 0.0 else max(fmax, mass_ema * mass_scale + (1 - mass_ema) * fmax)
             mass = mass / mass_scale if mass_scale > 0 else mass
+            if coh_w > 0:
+                coh = np.array([box_coherence(b, fld) for b in p.boxes], np.float32)
+            else:
+                coh = np.zeros(len(p.boxes), np.float32)
             pred = pos + vel
             emis = np.empty(len(cents), np.float32)
             for i, (cx, cy) in enumerate(cents):
                 d = math.hypot(cx - pred[0], cy - pred[1])
                 prox = math.exp(-(d / (prox_sigma * radius)) ** 2)
-                emis[i] = mass[i] + prox_w * prox
+                emis[i] = mass[i] * (1.0 + coh_w * coh[i]) + prox_w * prox
             if prev_alpha is None or prev_cents is None:
                 alpha = emis.copy()
             else:
@@ -1684,7 +1691,7 @@ _PAPER_PICK_MODES = (
 
 # All selectable modes, in leaderboard order. Single source of truth shared by
 # run_clip's argparse and the eval_modes harness so the two never drift.
-ALL_MODES = ("chain", *_PAPER_PICK_MODES, "outlier", "accum", "field", "field_lag", "field_coh", "fpath", "fpath_reacq")
+ALL_MODES = ("chain", *_PAPER_PICK_MODES, "outlier", "accum", "field", "field_lag", "field_coh", "fpath", "fpath_coh", "fpath_reacq")
 
 
 def _dispatch_mode(clip: Path, packs: list[FusionPack], lock: LockInfo | None,
@@ -1707,6 +1714,9 @@ def _dispatch_mode(clip: Path, packs: list[FusionPack], lock: LockInfo | None,
         return track_field_coh_identity(clip, packs, lock, frame_wh=frame_wh)
     if mode == "fpath":
         return track_fused_path_identity(clip, packs, lock, frame_wh=frame_wh)
+    if mode == "fpath_coh":
+        return track_fused_path_identity(clip, packs, lock, frame_wh=frame_wh,
+                                         coh_w=FPATH_COH_W_DEFAULT)
     if mode == "fpath_reacq":
         return track_fused_path_identity(clip, packs, lock, frame_wh=frame_wh,
                                          reacquire=True,
