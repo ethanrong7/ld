@@ -6,6 +6,81 @@ MapleStory's "Lie Detector" minigame shows a sheet covered in many **identical**
 
 **Online / live constraint.** The solver sees frames one at a time and must emit a position without future frames. A bounded fixed-lag buffer (~10–15 frames, ~0.5s) is permissible — the shape physically cannot leave its radius in that window.
 
+## Setup
+
+### 1. Activate virtual environment
+
+**Mac/Linux:**
+```bash
+source .venv/bin/activate
+```
+
+**Windows (PowerShell):**
+```powershell
+.venv\Scripts\Activate.ps1
+```
+> If you get an execution policy error: `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser`
+
+### 2. Install dependencies
+
+**Mac/Linux:**
+```bash
+.venv/bin/python -m pip install -r requirements.txt
+```
+
+**Windows:**
+```powershell
+.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+### 3. Train the YOLO model
+
+The best model is `yolov8n_single_combined` (single-class, oracle 0.974). Weights are not committed to the repo — you must train locally. Takes ~12 min on M3 Pro, longer on Windows/CPU.
+
+**Mac/Linux:**
+```bash
+.venv/bin/python -m ld.detect.build_s_dataset \
+    --labels-dir data/detect/s_labels_single \
+    --out-dir data/detect/dataset_single_combined
+
+.venv/bin/python -m ld.detect.train \
+    --data data/detect/dataset_single_combined/dataset.yaml \
+    --name yolov8n_single_combined
+```
+
+**Windows:**
+```powershell
+.venv\Scripts\python.exe -m ld.detect.build_s_dataset --labels-dir data/detect/s_labels_single --out-dir data/detect/dataset_single_combined
+
+.venv\Scripts\python.exe -m ld.detect.train --data data/detect/dataset_single_combined/dataset.yaml --name yolov8n_single_combined
+```
+
+Weights will be saved to `data/detect/runs/yolov8n_single_combined/weights/best.pt`.
+
+### 4. Generate evidence videos for all identity methods
+
+Run evidence renders for all competitive identity modes across t1–t10:
+
+**Mac/Linux:**
+```bash
+for mode in fpath field_coh field_lag field; do
+    .venv/bin/python -m ld.detect.render_evidence \
+        --weights data/detect/runs/yolov8n_single_combined/weights/best.pt \
+        --mode $mode
+done
+```
+
+**Windows:**
+```powershell
+foreach ($mode in @("fpath", "field_coh", "field_lag", "field")) {
+    .venv\Scripts\python.exe -m ld.detect.render_evidence --weights data/detect/runs/yolov8n_single_combined/weights/best.pt --mode $mode
+}
+```
+
+Output: `data/detect/evidence/<clip>_<mode>.mp4`
+
+---
+
 ## Pipeline (two separable stages)
 
 1. **Detection** — YOLOv8n (`data/detect/runs/yolov8n_single_combined/weights/best.pt`) finds candidate shape boxes per frame. Oracle within_r ≈ **0.974**. Detection is effectively solved. The real shape is camouflaged and ranks ~10–13 in confidence; you cannot filter by confidence without losing it.
