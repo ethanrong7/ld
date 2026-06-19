@@ -38,6 +38,11 @@ data/detect/_*.png
 *.pt
 /Ultralytics/
 
+# Scratch: probe/eval/render stdout dumps + ad-hoc crop probes (regenerable, never committed)
+/*_out.txt
+/_crops/
+/_crop_probe.py
+
 # OS
 .DS_Store
 Thumbs.db

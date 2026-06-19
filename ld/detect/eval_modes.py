@@ -32,7 +32,7 @@ from pathlib import Path
 from ld.capture.video_source import VideoSource
 from ld.config import DATA_DIR, DETECT_DIR
 from ld.detect.fusion import FusionPack, detect_fusion_clip
-from ld.detect.identity import (ALL_MODES, LockInfo, TrackPoint, _centroid,
+from ld.detect.identity import (ALL_MODES, BOARD_MODES, LockInfo, TrackPoint, _centroid,
                                 _dispatch_mode, compute_countdown_lock,
                                 score_identity)
 
@@ -214,13 +214,21 @@ def _write_leaderboard(summaries: list[ModeSummary], rows: list[ModeClipRow],
         best = summaries[0].mode
         lines.append(f"## Per-clip `within_r` — leader (`{best}`)")
         lines.append("")
-        br = sorted((r for r in rows if r.mode == best), key=lambda r: r.clip)
+        # numeric clip order (t1, t2, ..., t10), not lexical (t1, t10, t2, ...).
+        br = sorted((r for r in rows if r.mode == best),
+                    key=lambda r: int(r.clip[1:]) if r.clip[1:].isdigit() else 0)
         lines.append("| clip | within_r | median_px | oracle | drift_onset |")
         lines.append("|------|---------:|----------:|-------:|------------:|")
         for r in br:
             onset = "never" if r.drift_onset < 0 else str(r.drift_onset)
             lines.append(f"| {r.clip} | {r.within_r:.3f} | {r.median_px:.1f} | "
                          f"{r.oracle_within_r:.3f} | {onset} |")
+        # column averages across the clips (drift_onset omitted -- not meaningful to average
+        # across drifting/never-drifting clips; see the drift_frac summary column above).
+        if br:
+            lines.append(f"| **mean** | **{statistics.mean(r.within_r for r in br):.3f}** | "
+                         f"**{statistics.mean(r.median_px for r in br):.1f}** | "
+                         f"**{statistics.mean(r.oracle_within_r for r in br):.3f}** | n/a |")
         lines.append("")
     LEADERBOARD_MD.write_text("\n".join(lines))
     print(f"\nleaderboard -> {LEADERBOARD_MD}")
@@ -231,8 +239,9 @@ def main() -> None:
     ap.add_argument("--weights", default=DEFAULT_WEIGHTS)
     ap.add_argument("--clips", nargs="*", default=None,
                     help="clip stems or paths; default = all data/t*_cropped_trimmed.mp4")
-    ap.add_argument("--modes", nargs="*", default=list(ALL_MODES),
-                    help=f"subset of modes; default = all ({len(ALL_MODES)})")
+    ap.add_argument("--modes", nargs="*", default=list(BOARD_MODES),
+                    help=f"subset of modes; default = competitive board ({len(BOARD_MODES)}); "
+                         f"retired modes still runnable by name (full set: {len(ALL_MODES)})")
     ap.add_argument("--conf", type=float, default=0.25)
     ap.add_argument("--imgsz", type=int, default=768)
     args = ap.parse_args()

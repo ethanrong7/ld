@@ -1450,6 +1450,90 @@ FPATH_FUSE_WIN = 12       # causal window (frames) coherent-mass / curl accumula
 FPATH_FUSE_CMASS_W = 1.5
 FPATH_FUSE_CURL_W = 0.5
 
+# EMA-coherent-mass hysteresis override (mode "fpath_hyst"). EXP-3 (exp3_switch_probe /
+# exp3_sweep, 2026-06-19): a leaky EMA of per-box instantaneous coherent-mass, carried to
+# each box's CURRENT location by nearest-centroid association, sits on GT 0.51 of t1's miss
+# frames -- the only laggard clearing 0.5 (fixed windows stay 0.3-0.4; the carry is what
+# tracks moving boxes). A DISTANCE-AGNOSTIC switch that fires when a challenger leads the
+# path box's EMA by >margin for >=consec frames catches t1's ADJACENT creep that the dead
+# far-jump reacquire structurally cannot, while the margin+consec gate keeps it silent on
+# the strong lock-in clips. LOO sweep: +0.0022 mean, worst-clip +0.000 -- the first lock-in
+# escape with NO strong-clip regression; all 10 folds select this same conservative corner.
+FPATH_HYST_ALPHA = 0.92    # leaky-EMA retention of past coherent-mass (0 = override off)
+FPATH_HYST_MARGIN = 0.30   # challenger must lead the path box's EMA by this fraction
+FPATH_HYST_CONSEC = 10     # ...for this many consecutive frames before the switch fires
+
+# Churn-gated freeze hedge (mode "fpath_hedge"). hedge_probe (2026-06-19): the catastrophic
+# misses are SWEPT-LOCKS -- the path hops among adjacent fakes and rides the rigid sheet
+# 200-400px from the (near-stationary) real shape. A pure freeze recovers 100% of those miss
+# frames, but the MAGNITUDE of independent motion can't trigger it -- |d_indep| is HIGHER on
+# laggard hops (9.8-10.3 px/fr) than on the correctly-tracked slow real shape (strong clips
+# 3.3-7.4). The separator is DIRECTIONAL COHERENCE: churn = mean|d_indep| * (1 - R), with
+# R = |sum d_indep| / sum|d_indep| in [0,1]. A coherent burst (real shape, one direction, same
+# box) -> R~1 -> churn~0 -> commit; an incoherent box-hop (directions cancel) -> R~0 -> churn
+# high -> freeze. DECODE-LAYER ONLY: output = w*chosen_centroid + (1-w)*prev_output, with
+# w = clamp(1 - churn/churn_hi, 0, 1); the trellis/identity state is byte-identical to
+# fpath_hyst (the hedge never enters the emission -- dodges the dead proximity-prior). Gate:
+# every clip flat-or-up, mean within_r +0.021 (0.878->~0.899), worst-clip +0.000.
+FPATH_HEDGE_CHURN_HI = 8.0   # churn (px/frame) at which trust w hits 0 (full freeze)
+FPATH_HEDGE_WIN = 8          # causal window the churn coherence/magnitude accumulate over
+
+
+# Residual-gated freeze (mode "fpath_freeze"). resid_freeze_probe (2026-06-20): the churn hedge
+# only catches SWEPT locks (incoherent box-hops); it cannot fix the COHERENT identity-locks where
+# the path creeps onto an adjacent fake and rides it smoothly -- there the hedge freezes at the
+# wrong (fake) location, preserving the error. EXP-Q1's cumulative sheet-frame residual answers a
+# 1-box BINARY the override (EXP-Q2b, dead) could not answer as a 15-box ranking: "is the box I am
+# HOLDING a rigid fake?". A fake's N=30 residual is just detector jitter (~9-15px, near a clip- and
+# radius-independent floor); the real shape's is much higher (~45-91px, its accumulated independent
+# drift). When the chosen box's residual falls below the floor (tau) for `consec` frames we have
+# locked onto a fake -> FREEZE the output toward a LAGGED pre-creep anchor (the output `lag` frames
+# ago, before the creep started) and hold until the residual recovers (the trellis re-acquired the
+# real shape). Works because the real shape barely moves (median 1.3 px/fr), so an onset-anchored
+# freeze stays within radius for 20+ frame runs. DECODE-LAYER ONLY (identity state untouched), and
+# runs BEFORE the churn hedge (which then passes the frozen position through: a held position reads
+# as coherent sheet motion -> churn~0 -> w~1 -> commit). Gate: LOO 0.899->0.936, worst-clip +0.000,
+# all 10 folds independently select tau=15/lag=6/consec=1 (t8 +0.133, t1 +0.074, t5 +0.049).
+FPATH_FREEZE_TAU = 15.0      # residual (px) below which the chosen box reads as a rigid fake
+FPATH_FREEZE_LAG = 6         # frames to rewind the freeze anchor toward the lock onset
+FPATH_FREEZE_CONSEC = 1      # consecutive below-floor frames required before freezing
+FPATH_FREEZE_N = 30          # horizon (frames) the cumulative sheet-frame residual integrates over
+
+
+def _cumulative_residual(rhist, chosen_cent, n, radius):
+    """Cumulative sheet-frame residual magnitude of the chosen box over horizon `n`, via a causal
+    affine-prediction back-walk (mirrors resid_override_probe._residual_mag, validated by the gate).
+
+    `rhist` is a deque of (cents, inv_affine) per recent frame, rhist[-1] = current frame; `cents`
+    is the list of box centroids that frame (or None on a coast/no-box frame), `inv_affine` inverts
+    that frame's prev->cur sheet affine (or None). Walk back n frames: at each step map the running
+    points by the inverse affine (rigid back-transport) and snap the chain to the nearest actual
+    centroid in the previous frame; the residual is how far the rigid back-transport of the frame-t
+    centroid ends up from its actual n-frames-ago ancestor. Returns None if the chain breaks -- a
+    gap/coast in the window, a missing affine, or a snap beyond the radius -- so the freeze then
+    conservatively does not fire (a fake whose chain breaks is simply not frozen that frame)."""
+    if len(rhist) < n + 1:
+        return None
+    p_ref = np.asarray(chosen_cent, np.float64)
+    chain = np.asarray(chosen_cent, np.float64)
+    r2 = radius * radius
+    for s in range(1, n + 1):
+        _cents_cur, invaff = rhist[-s]            # frame t-s+1: its affine maps (t-s)->(t-s+1)
+        cents_prev, _inv_prev = rhist[-s - 1]     # frame t-s: the actual ancestor centroids
+        if invaff is None or not cents_prev:
+            return None
+        p_ref = invaff[:, :2] @ p_ref + invaff[:, 2]
+        pred = invaff[:, :2] @ chain + invaff[:, 2]
+        bj, bd = -1, 1e18
+        for j, (cx, cy) in enumerate(cents_prev):
+            d = (cx - pred[0]) ** 2 + (cy - pred[1]) ** 2
+            if d < bd:
+                bd, bj = d, j
+        if bd >= r2:                              # nearest ancestor beyond radius -> chain broke
+            return None
+        chain = np.asarray(cents_prev[bj], np.float64)
+    return float(math.hypot(p_ref[0] - chain[0], p_ref[1] - chain[1]))
+
 
 def track_fused_path_identity(clip: str | Path, packs: list[FusionPack],
                               lock: LockInfo | None = None, *,
@@ -1466,6 +1550,17 @@ def track_fused_path_identity(clip: str | Path, packs: list[FusionPack],
                               cmass_w: float = FPATH_CMASS_W,
                               curl_w: float = FPATH_CURL_W,
                               fuse_win: int = FPATH_FUSE_WIN,
+                              hyst_alpha: float = 0.0,
+                              hyst_margin: float = 0.0,
+                              hyst_consec: int = 0,
+                              hedge: bool = False,
+                              hedge_churn_hi: float = FPATH_HEDGE_CHURN_HI,
+                              hedge_win: int = FPATH_HEDGE_WIN,
+                              freeze: bool = False,
+                              freeze_tau: float = FPATH_FREEZE_TAU,
+                              freeze_lag: int = FPATH_FREEZE_LAG,
+                              freeze_consec: int = FPATH_FREEZE_CONSEC,
+                              freeze_n: int = FPATH_FREEZE_N,
                               ) -> tuple[list[TrackPoint], list[int | None], int, float]:
     """Causal Viterbi-style integrator fusing saliency mass + CV-proximity prior.
 
@@ -1497,6 +1592,23 @@ def track_fused_path_identity(clip: str | Path, packs: list[FusionPack],
     from collections import deque
     use_fuse = cmass_w > 0 or curl_w > 0
     ovecs_hist: deque = deque(maxlen=fuse_win) if use_fuse else None
+    use_hyst = hyst_alpha > 0 and hyst_consec > 0
+    ema_cm: np.ndarray | None = None      # leaky EMA of instantaneous coherent-mass
+    ema_cents: list[tuple[float, float]] | None = None
+    hyst_streak = 0
+    # Churn-gated freeze hedge (mode fpath_hedge): a decode-layer output blend that holds
+    # position when the pick is churning (incoherent box-hops); identity state untouched.
+    hpos: np.ndarray | None = None        # hedged OUTPUT position (what gets emitted)
+    hwin: deque = deque(maxlen=hedge_win)  # recent chosen-box independent-motion vectors
+    hprev_cent: np.ndarray | None = None   # chosen-box centroid at the last track frame
+    # Residual-gated freeze (mode fpath_freeze): runs BEFORE the hedge; transforms the committed
+    # output to a held pre-onset anchor when the chosen box's N-residual collapses to the fake floor.
+    use_freeze = freeze
+    rhist: deque | None = deque(maxlen=freeze_n + 1) if use_freeze else None  # (cents, inv_aff)/frame
+    freeze_buf: deque | None = deque(maxlen=max(freeze_lag, 1)) if use_freeze else None  # past outputs
+    fpos: np.ndarray | None = None   # the held (frozen) output position
+    frozen = False        # currently holding the anchor
+    low_streak = 0        # consecutive below-floor (on-a-fake) frames
 
     track: list[TrackPoint] = []
     locked_hist: list[int | None] = []
@@ -1527,8 +1639,11 @@ def track_fused_path_identity(clip: str | Path, packs: list[FusionPack],
             continue
 
         x, y, state = float(pos[0]), float(pos[1]), "coast"
+        cur_affine = None  # this frame's global sheet affine (set in the track branch)
+        frame_cents = None  # this frame's box centroids (set in the track branch; None on coast)
         if prev_gray is not None and active and p.boxes:
             fld = estimate_motion(prev_gray, gray)
+            cur_affine = fld.affine
             sal = saliency_map(fld, gray.shape)
             cents = [_centroid(b) for b in p.boxes]
             mass = np.array([_box_saliency_mass(b, sal) for b in p.boxes], np.float32)
@@ -1561,6 +1676,26 @@ def track_fused_path_identity(clip: str | Path, packs: list[FusionPack],
                     upk = float(cu.max())
                     curl_scale = upk if curl_scale == 0.0 else max(upk, mass_ema * curl_scale + (1 - mass_ema) * upk)
                     curl = cu / curl_scale if curl_scale > 0 else cu
+            # Leaky EMA of instantaneous (single-frame) coherent-mass, carried to each
+            # current box by nearest-centroid association (mode fpath_hyst, EXP-3).
+            if use_hyst:
+                inst_cm = np.array(
+                    [_box_coherent_mass(b, [(fld.outliers, fld.outlier_vectors)])
+                     for b in p.boxes], np.float32)
+                if ema_cm is not None and ema_cents is not None:
+                    new_ema = inst_cm.copy()
+                    for i, (cx, cy) in enumerate(cents):
+                        bd, bj = 1e18, -1
+                        for pj, (px, py) in enumerate(ema_cents):
+                            dd = (px - cx) ** 2 + (py - cy) ** 2
+                            if dd < bd:
+                                bd, bj = dd, pj
+                        if bj >= 0:
+                            new_ema[i] = hyst_alpha * ema_cm[bj] + (1 - hyst_alpha) * inst_cm[i]
+                    ema_cm = new_ema
+                else:
+                    ema_cm = inst_cm
+                ema_cents = cents
             pred = pos + vel
             emis = np.empty(len(cents), np.float32)
             for i, (cx, cy) in enumerate(cents):
@@ -1595,10 +1730,27 @@ def track_fused_path_identity(clip: str | Path, packs: list[FusionPack],
                     choice = best_mass_idx
                     prev_alpha, prev_cents = None, None
                     vel[:] = 0.0
+            # EMA-coherent-mass hysteresis override (fpath_hyst, EXP-3): switch the path
+            # to a box that PERSISTENTLY dominates the leaky-integrated coherent-mass,
+            # regardless of distance. Resets path memory so the transition prior doesn't
+            # immediately drag the path back onto the box it had locked.
+            hyst_fired = False
+            if use_hyst and ema_cm is not None:
+                chal = int(np.argmax(ema_cm))
+                if chal != choice and ema_cm[chal] > (1.0 + hyst_margin) * max(float(ema_cm[choice]), 1e-9):
+                    hyst_streak += 1
+                else:
+                    hyst_streak = 0
+                if hyst_streak >= hyst_consec:
+                    choice = chal
+                    hyst_fired = True
+                    hyst_streak = 0
+                    vel[:] = 0.0
             nx, ny = cents[choice]
             vel = vel_damp * vel + (1.0 - vel_damp) * (np.array([nx, ny], np.float32) - pos)
             x, y, state = nx, ny, "track"
-            prev_alpha, prev_cents = alpha, cents
+            frame_cents = cents  # for the residual back-walk (mode fpath_freeze)
+            prev_alpha, prev_cents = (None, None) if hyst_fired else (alpha, cents)
             lost = 0
         else:
             # Coast: advance via CV prediction, wipe trellis (no boxes to anchor)
@@ -1611,7 +1763,58 @@ def track_fused_path_identity(clip: str | Path, packs: list[FusionPack],
             x = float(np.clip(x, 0, fw - 1))
             y = float(np.clip(y, 0, fh - 1))
         pos = np.array([x, y], np.float32)
-        track.append(TrackPoint(p.idx, x, y, state, len(p.boxes)))
+        if use_freeze:
+            # Residual-gated freeze (mode fpath_freeze), BEFORE the hedge. Push this frame's
+            # (centroids, inverse sheet affine) for the back-walk; coast frames push None and
+            # break the chain. `committed` == the chosen-box output (decode-layer only: `pos`
+            # above keeps the committed value, so the trellis/CV state is untouched). When the
+            # chosen box's cumulative residual collapses to the fake floor for `freeze_consec`
+            # frames, hold the output at the lagged pre-creep anchor (freeze_buf[0]); release to
+            # the live pick when it recovers. A broken chain (rv None) leaves low False -> commit.
+            invaff = (cv2.invertAffineTransform(np.asarray(cur_affine, np.float64))
+                      if cur_affine is not None else None)
+            rhist.append((frame_cents, invaff))
+            committed = np.array([x, y], np.float64)
+            rv = (_cumulative_residual(rhist, committed, freeze_n, radius)
+                  if state == "track" else None)
+            low = rv is not None and rv < freeze_tau
+            low_streak = low_streak + 1 if low else 0
+            if low_streak >= freeze_consec:
+                if not frozen:                       # onset: rewind to the pre-creep anchor
+                    fpos = (np.asarray(freeze_buf[0], np.float64)
+                            if (freeze_lag > 0 and len(freeze_buf) > 0) else committed.copy())
+                    frozen = True
+                # else: hold fpos
+            else:
+                frozen = False
+                fpos = committed.copy()              # commit to the live pick
+            freeze_buf.append(committed.copy())
+            x, y = float(fpos[0]), float(fpos[1])
+        out_x, out_y = x, y
+        if hedge:
+            # Decode-layer churn-gated freeze. c_t = the committed output (== chosen box
+            # centroid on track frames). Accumulate the chosen box's per-frame independent
+            # motion (sheet-removed) over a causal window; freeze the output toward its last
+            # value when that motion is large AND directionally incoherent (a box-hop), keep
+            # committing when it is coherent (a real-shape burst) or small (stable lock).
+            c_t = np.array([x, y], np.float64)
+            if state == "track" and cur_affine is not None and hprev_cent is not None:
+                T = cur_affine
+                hwin.append(c_t - (T[:, :2] @ hprev_cent + T[:, 2]))
+            if state == "track":
+                hprev_cent = c_t.copy()
+            if hwin:
+                mags = [float(math.hypot(v[0], v[1])) for v in hwin]
+                s = np.sum(hwin, axis=0)
+                tot_m = sum(mags)
+                R = float(math.hypot(s[0], s[1]) / tot_m) if tot_m > 1e-9 else 0.0
+                churn = (tot_m / len(mags)) * (1.0 - R)
+                w = min(max(1.0 - churn / hedge_churn_hi, 0.0), 1.0)
+            else:
+                w = 1.0
+            hpos = c_t.copy() if hpos is None else w * c_t + (1.0 - w) * hpos
+            out_x, out_y = float(hpos[0]), float(hpos[1])
+        track.append(TrackPoint(p.idx, out_x, out_y, state, len(p.boxes)))
         locked_hist.append(None)
         prev_gray = gray
 
@@ -1735,9 +1938,18 @@ _PAPER_PICK_MODES = (
     "paper", "paper_outlier", "paper_outlier_rank",
 )
 
-# All selectable modes, in leaderboard order. Single source of truth shared by
-# run_clip's argparse and the eval_modes harness so the two never drift.
-ALL_MODES = ("chain", *_PAPER_PICK_MODES, "outlier", "accum", "field", "field_lag", "field_coh", "fpath", "fpath_coh", "fpath_reacq", "fpath_fuse")
+# Full dispatch registry: every mode `_dispatch_mode` can run. run_clip's argparse
+# choices use this so any historical mode stays invokable (`--mode <name>` / eval_modes
+# `--modes <name>`); nothing here is deleted, only retired from the DEFAULT board below.
+ALL_MODES = ("chain", *_PAPER_PICK_MODES, "outlier", "accum", "field", "field_lag", "field_coh", "fpath", "fpath_coh", "fpath_reacq", "fpath_fuse", "fpath_hyst", "fpath_hedge", "fpath_freeze")
+
+# Default leaderboard set (eval_modes `--modes` default). The 7 competitive / actively-
+# researched modes: the fpath leader lineage (pure-mass baseline -> coh -> fuse -> hyst)
+# plus the non-trellis field family (no path memory; field_coh still beats the trellis on
+# t1). The other 7 modes in ALL_MODES are permanently dominated (all < field's 0.74) and
+# frozen -- retired from routine regens (2026-06-19) to ~halve eval time. They remain fully
+# runnable via `--modes <name>`; see CLAUDE.md dead-ends / mode-stack for why each is out.
+BOARD_MODES = ("field", "field_lag", "field_coh", "fpath", "fpath_coh", "fpath_fuse", "fpath_hyst", "fpath_hedge", "fpath_freeze")
 
 
 def _dispatch_mode(clip: Path, packs: list[FusionPack], lock: LockInfo | None,
@@ -1767,6 +1979,29 @@ def _dispatch_mode(clip: Path, packs: list[FusionPack], lock: LockInfo | None,
         return track_fused_path_identity(clip, packs, lock, frame_wh=frame_wh,
                                          cmass_w=FPATH_FUSE_CMASS_W,
                                          curl_w=FPATH_FUSE_CURL_W)
+    if mode == "fpath_hyst":
+        return track_fused_path_identity(clip, packs, lock, frame_wh=frame_wh,
+                                         cmass_w=FPATH_FUSE_CMASS_W,
+                                         curl_w=FPATH_FUSE_CURL_W,
+                                         hyst_alpha=FPATH_HYST_ALPHA,
+                                         hyst_margin=FPATH_HYST_MARGIN,
+                                         hyst_consec=FPATH_HYST_CONSEC)
+    if mode == "fpath_hedge":
+        return track_fused_path_identity(clip, packs, lock, frame_wh=frame_wh,
+                                         cmass_w=FPATH_FUSE_CMASS_W,
+                                         curl_w=FPATH_FUSE_CURL_W,
+                                         hyst_alpha=FPATH_HYST_ALPHA,
+                                         hyst_margin=FPATH_HYST_MARGIN,
+                                         hyst_consec=FPATH_HYST_CONSEC,
+                                         hedge=True)
+    if mode == "fpath_freeze":
+        return track_fused_path_identity(clip, packs, lock, frame_wh=frame_wh,
+                                         cmass_w=FPATH_FUSE_CMASS_W,
+                                         curl_w=FPATH_FUSE_CURL_W,
+                                         hyst_alpha=FPATH_HYST_ALPHA,
+                                         hyst_margin=FPATH_HYST_MARGIN,
+                                         hyst_consec=FPATH_HYST_CONSEC,
+                                         hedge=True, freeze=True)
     if mode == "fpath_reacq":
         return track_fused_path_identity(clip, packs, lock, frame_wh=frame_wh,
                                          reacquire=True,
@@ -1781,7 +2016,7 @@ def _dispatch_mode(clip: Path, packs: list[FusionPack], lock: LockInfo | None,
 
 def run_clip(weights: str | Path, clip: str | Path, *, conf: float = 0.25,
              imgsz: int = 768, use_cache: bool = True, evidence: bool = False,
-             mode: str = "fpath_fuse") -> IdentityReport:
+             mode: str = "fpath_hyst") -> IdentityReport:
     clip = Path(clip)
     name = clip.stem.replace("_cropped_trimmed", "")
     packs = detect_fusion_clip(weights, clip, conf=conf, imgsz=imgsz, use_cache=use_cache)
@@ -1814,9 +2049,10 @@ def main() -> None:
     ap.add_argument("--evidence", action="store_true")
     ap.add_argument("--mode",
                     choices=ALL_MODES,
-                    default="fpath_fuse",
-                    help="fpath_fuse=default, leader (Viterbi path integrator with "
-                         "additive mass+coherent-mass+curl emission); fpath_coh=mass*coh "
+                    default="fpath_hyst",
+                    help="fpath_hyst=default, leader (fpath_fuse + EMA-coherent-mass "
+                         "hysteresis override); fpath_fuse=additive mass+coherent-mass+curl "
+                         "emission Viterbi; fpath_coh=mass*coh "
                          "emission; fpath=pure-mass Viterbi; field_coh=field_lag + coherence "
                          "far-jump override; field/field_lag=position-field saliency + snap; "
                          "accum/paper_outlier_rank/etc=older baselines; "
