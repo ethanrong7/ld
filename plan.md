@@ -1,310 +1,168 @@
-Session Summary & Future Recommendations
+# LD identity — session plan (2026-06-19)
+
+Session-scoped working doc. Tells a new agent: what we did, why we're stuck at 0.876,
+and the concrete experiments to push **mean within_r ≥ 0.90**. Ground truth lives in
+`CLAUDE.md` (leader, taxonomy, dead ends) and `ld/detect/LEADERBOARD.md` (numbers). If
+this plan and CLAUDE.md disagree, CLAUDE.md wins — re-verify before trusting either.
 
 ---
 
-What We Did This Session
+## Current state (merged to master)
 
-Detection improvements (SHIPPED)
+**Leader: `fpath_fuse` @ 0.876 within_r** (conditional 0.913, oracle 0.958). Up from the
+prior leader `fpath_coh` 0.825. Verified by `eval_modes`, no per-clip regression.
 
-Problem: Oracle was 0.915 on old model; t1 in particular was 0.806 because the shape drifted to the top-left edge where no training examples existed.
+| clip | within_r | oracle | headroom | residual-loss character |
+|------|---------:|-------:|---------:|-------------------------|
+| t1 | 0.783 | 0.952 | 0.17 | **lock-in**, creep onto ADJACENT box |
+| t2 | 0.978 | 0.978 | ~0 | at ceiling |
+| t3 | 0.852 | 0.918 | 0.07 | mixed |
+| t4 | 0.849 | 0.944 | 0.09 | detection-gap + emission (fixed a lot this session) |
+| t5 | 0.759 | 0.948 | 0.19 | **lock-in**, far teleport-lock |
+| t6 | 0.922 | 0.970 | 0.05 | near ceiling |
+| t7 | 0.989 | 0.998 | ~0 | at ceiling |
+| t8 | 0.767 | 0.939 | 0.17 | **lock-in**, far teleport-lock + signal-limited |
+| t9 | 0.924 | 0.973 | 0.05 | near ceiling |
+| t10 | 0.937 | 0.964 | 0.03 | near ceiling |
+| **mean** | **0.876** | **0.958** | | |
 
-Solution: Built a full annotation pipeline (annotate_s.py) supporting drag-to-draw boxes with full/partial class toggle, extracted 5 targeted frames from t1's miss cluster (f225–300, shape at top-left corner), migrated all labels to single-class, trained yolov8n_single_combined.
-
-Result: Oracle improved from 0.915 → 0.974 across all 10 clips. t1 oracle improved in lock-step — confirming that better detection directly lifts identity.
-
-Key lesson: Targeted visual coverage of the specific failure position beats label schema changes at ~55 frames. Two-class (full/partial) split was tried and regressed oracle — halves instances per class.
-
----
-
-Lock bug investigation (CLOSED)
-
-Probed t1 and t4 lock behaviour with the new detector. Both now lock correctly:
-- t1: anchor at (381.6, 229.3), picked box at 7.0px from GT
-- t4: anchor at (342.8, 298.9), picked box at 36.2px from GT (within_r)
-
-The 2.04r/2.57r errors in memory were old-model artifacts. The new detector resolves them.
-Note: t4's anchor drifts slightly because the white detector jumps 67px at f92-f98 (below
-the 80px WHITE_TELEPORT_PX guard), leaving the anchor ~57px off before the START-text
-teleport at f99 finally breaks it. This is structural fragility but does NOT cause the
-current t4 regression -- the picked box is within_r. Lock bug item is closed.
+Gap to 0.90 is **+0.024**, concentrated entirely in three lock-in laggards: **t8 (0.767),
+t5 (0.759), t1 (0.783)**.
 
 ---
 
-Failure Mode Taxonomy (all four laggards, fpath mode)
+## What we did this session
 
-Probed per-frame trace CSVs (data/detect/eval/<clip>__fpath.csv) and lock diagnostics.
-
-t1 (0.806) -- two patterns, both post-lock, both oracle=1
-  f146-168 (23 frames): slow creep -- error builds 36->92px over ~8 frames then locks in
-  f500-558 (59 frames): TELEPORT -- error jumps 53->108px in one frame, stays locked 59 frames
-
-t4 (0.729) -- two patterns, very different root causes
-  f107 (1 frame): single-frame hop, self-corrects
-  f383-520 (138 frames): DETECTION GAP -- oracle_hit=0 right at onset; real shape drops
-    out of detector for many frames; fpath reacquires to wrong box and holds it 138 frames.
-    This is the dominant t4 loss. Not fixable by emission signal -- detector coverage needed.
-
-t5 (0.718) -- TELEPORTS dominate, NOT creep (the old "CREEP not JUMP" diagnosis was field-era)
-  f328-387 (60 frames): 50->176px jump in one frame, oracle=1 throughout
-  f516-556 (41 frames): 48->198px jump in one frame, oracle=1 throughout
-  Root cause: a far high-saliency fake outscores the real shape on outlier mass for one
-  frame. Viterbi path switches and stays switched for 40-60 frames.
-
-t8 (0.664) -- mixed: teleports + detection gaps
-  f226-253 (~28 frames): detection gap cluster (oracle=0 at f232-239); destabilises track
-  f284-380 (97 frames): TELEPORT -- 10->99px in one frame, oracle=1. DOMINANT t8 loss.
-  f634 (9 frames): detection gap onset (oracle=0)
-  f662-719 (58 frames): TELEPORT -- 49->182px in one frame, oracle=1
-
-Frames-lost summary:
-  Sudden teleports (oracle=1): t1 f500, t5 f328, t5 f516, t8 f284, t8 f662  ->  ~313 frames
-  Detection gaps (oracle=0):   t4 f383, t8 f226, t8 f634                    ->  ~165 frames
-  Slow creep (oracle=1):       t1 f146                                       ->   ~23 frames
+1. **Fixed stale docs.** CLAUDE.md claimed `fpath` 0.855 / oracle 0.974; reality was
+   `fpath_coh` 0.825 / oracle 0.958. Regenerated the leaderboard, corrected every number.
+2. **Built the gate `fuse_probe.py`** → sharpened the failure taxonomy. On the trellis's
+   miss frames, *which channel ranks the real box #1 is regime-split*: coherence wins t4
+   (0.60), curl wins t5 (0.50), mass barely wins t1/t8 (~0.40). **Max-fusion is dead**
+   (top-1 0.22). Coherence is the best *candidate generator* (top-3 recall on miss frames
+   0.842 vs mass 0.803).
+3. **Shipped `fpath_fuse` (+0.051).** Replaced `fpath_coh`'s multiplicative `mass*(1+coh)`
+   emission with an **additive** sum of cross-frame-normalized channels:
+   `norm(mass) + 1.5·norm(coherent_mass) + 0.5·norm(curl)`, fed to the same Viterbi trellis.
+   Tuned by LOO (`fuse_sweep.py`). Biggest gains where predicted: t4 +0.106, t5 +0.138.
+4. **Window sweep → no gain.** Swept `fuse_win {8,12,16,20}` × weights; nothing beats
+   `win12 cmass1.5 curl0.5` without regressing a laggard. Window has no leverage.
+5. **Step-3 gate → both lock-in escapes dead.** `step3_gate.py` showed the coherence
+   far-jump reacquire has no target (on-GT+far+confident only 0.085/0.020 on t1/t8). The
+   transition-penalty cap helps t8 a little but regresses the strong clips (net −0.025..−0.075).
 
 ---
 
-Fix 1 -- Coherence-weighted emission (fpath_coh)
-=================================================
-Target: ~313 frames of teleport loss across t1/t5/t8. Highest EV.
+## Why we're stuck — the limiting factors
 
-ROOT CAUSE
+The detector is solved (oracle 0.958); **100% of the residual loss is identity** — picking
+the wrong box when the right one is present. Three compounding walls:
 
-At each teleport onset a far fake has momentarily higher outlier mass than the real shape.
-Viterbi's emission is purely saliency mass -- scalar magnitude, no direction. The real shape
-moves independently and coherently: its residual vectors all point in roughly the same
-direction (the shape's own velocity relative to the sheet). A fake's residual features are
-noise: they point randomly because the fake moves with the sheet and its "outlier" features
-are just LK jitter with no consistent direction.
+1. **Lock-in is desirable on strong clips, fatal on laggards — and there is no causal key
+   to tell them apart.** The Viterbi transition penalty makes the path self-reinforcing.
+   That's why t2/t6/t7/t9/t10 sit at 0.92–0.99. Any *global* anti-lock mechanism
+   (transition cap, softening) trades those clips away for marginal laggard gains. This is
+   the central tension and the reason every global escape has failed.
 
-MotionField.outlier_vectors (motion.py:45) is an (M,2) array of per-feature residual
-vectors already computed in estimate_motion() (motion.py:91). saliency_map() discards
-direction and uses only magnitude. The coherence signal sits unused.
+2. **The motion channels (mass / coherence / curl) give top-3 but not reliable top-1 on
+   the hard frames.** On miss frames the real box is in the channels' top-3 ~84%, but no
+   channel's argmax reliably picks it (t8: mass 0.32, coh 0.24, curl 0.17). The Viterbi
+   converts a lot of that top-3 into a track, but on the residual frames the channels
+   genuinely cannot separate the real shape from a specific adjacent/confident fake. **t8
+   is signal-limited**: coherence's argmax is on the real shape <30% of its miss frames.
 
-HOW TO VERIFY THE SIGNAL EXISTS BEFORE BUILDING
+3. **The two failure geometries need opposite fixes.** `step3_gate` (2026-06-19):
+   - **t1 = adjacent creep** (challenger far only 0.28 of misses) → far-jump escapes can't
+     fire; the wrong box is <1.5 radii away.
+   - **t5/t8 = far teleport-lock** (challenger far 0.63) → far-jump *could* fire, but the
+     coherent challenger is wrong there (on-GT 0.29–0.40), so it would jump to another fake.
 
-Run this diagnostic on the two clearest teleport onsets:
-
-  python3 <<'EOF'
-  import sys; sys.path.insert(0, ".")
-  import cv2, math, numpy as np
-  from ld.detect.fusion import detect_fusion_clip
-  from ld.vision.cursor import strip_pointer
-  from ld.vision.motion import estimate_motion
-  from ld.capture.video_source import VideoSource
-
-  WEIGHTS = "data/detect/runs/yolov8n_single_combined/weights/best.pt"
-
-  def box_coherence_raw(box, field):
-      x1,y1,x2,y2 = box[:4]
-      mask = ((field.outliers[:,0]>=x1)&(field.outliers[:,0]<x2)&
-              (field.outliers[:,1]>=y1)&(field.outliers[:,1]<y2))
-      vecs = field.outlier_vectors[mask]
-      if len(vecs) < 2: return 0.0
-      norms = np.linalg.norm(vecs, axis=1, keepdims=True)
-      valid = norms.ravel() > 1e-6
-      if valid.sum() < 2: return 0.0
-      unit = vecs[valid] / norms[valid]
-      return float(np.linalg.norm(unit.mean(axis=0)))
-
-  for clip_path, onset in [("data/t5_cropped_trimmed.mp4", 328),
-                            ("data/t8_cropped_trimmed.mp4", 284)]:
-      packs = detect_fusion_clip(WEIGHTS, clip_path)
-      src = VideoSource(clip_path)
-      frames = {}
-      for idx, f in src.frames():
-          frames[idx] = cv2.cvtColor(strip_pointer(f, strip_green=True), cv2.COLOR_BGR2GRAY)
-          if idx > onset + 1: break
-      src.release()
-      p = packs[onset]
-      fld = estimate_motion(frames[onset-1], frames[onset])
-      gt = p.gt
-      print(f"\n{clip_path} f{onset}  gt=({round(gt[0])},{round(gt[1])})")
-      print(f"  {'i':>3}  {'cx':>6}  {'cy':>6}  {'gt_d':>6}  {'coh':>5}")
-      for i, box in enumerate(p.boxes):
-          cx=(box[0]+box[2])/2; cy=(box[1]+box[3])/2
-          gd=math.hypot(cx-gt[0],cy-gt[1])
-          print(f"  {i:>3}  {cx:>6.1f}  {cy:>6.1f}  {gd:>6.1f}  {box_coherence_raw(box,fld):>5.3f}")
-  EOF
-
-  Expected: GT-nearest box scores coherence clearly above the winning fake (delta > 0.1).
-  If separation < 0.1 on both clips, coherence won't discriminate -- stop here.
-
-IMPLEMENTATION (three files, ~40 lines total)
-
-A. ld/vision/motion.py -- add box_coherence() after saliency_map() (after line 107)
-
-  def box_coherence(box: tuple, field: MotionField) -> float:
-      """Mean resultant length of outlier residual vectors within a YOLO box.
-
-      Returns R in [0,1]: R=1 means all vectors aligned (real shape moves coherently),
-      R~0 means random directions (fake noise). Returns 0.0 if fewer than 2 outliers.
-      """
-      if field.outlier_vectors is None or len(field.outliers) == 0:
-          return 0.0
-      x1, y1, x2, y2 = box[0], box[1], box[2], box[3]
-      mask = (
-          (field.outliers[:, 0] >= x1) & (field.outliers[:, 0] < x2) &
-          (field.outliers[:, 1] >= y1) & (field.outliers[:, 1] < y2)
-      )
-      vecs = field.outlier_vectors[mask]
-      if len(vecs) < 2:
-          return 0.0
-      norms = np.linalg.norm(vecs, axis=1, keepdims=True)
-      valid = norms.ravel() > 1e-6
-      if valid.sum() < 2:
-          return 0.0
-      unit = vecs[valid] / norms[valid]
-      return float(np.linalg.norm(unit.mean(axis=0)))  # circular mean resultant R
-
-  Also add "box_coherence" to __all__ at line 34.
-
-B. ld/detect/identity.py -- add coh_w to track_fused_path_identity
-
-  1. Add constant near the FPATH_* block (~line 1423):
-       FPATH_COH_W = 0.0   # coherence emission weight; 0 = pure mass (current default)
-
-  2. Add to function signature (~line 1437):
-       coh_w: float = FPATH_COH_W,
-
-  3. Add import at top of file (with other motion imports):
-       from ld.vision.motion import estimate_motion, saliency_map, box_coherence
-
-  4. After sal = saliency_map(fld, gray.shape) (~line 1502), compute coherence:
-       if coh_w > 0:
-           coh = np.array([box_coherence(b, fld) for b in p.boxes], np.float32)
-       else:
-           coh = np.zeros(len(p.boxes), np.float32)
-
-  5. Modify emission (~line 1517):
-       # was:  emis[i] = mass[i] + prox_w * prox
-       emis[i] = mass[i] * (1.0 + coh_w * coh[i]) + prox_w * prox
-
-  The multiplicative form is intentional: coherence rescales mass rather than adding
-  to it. A box with mass=0 stays at 0 even with perfect coherence -- coherence boosts
-  signal, it cannot manufacture signal from silence. At coh_w=1.0 the most coherent
-  box gets at most 2x mass; an incoherent box gets 1x.
-
-C. ld/detect/identity.py -- register fpath_coh mode
-
-  1. Add tuning constant near FPATH_* block:
-       FPATH_COH_W_DEFAULT = 1.0  # confirm by sweep below; adjust if needed
-
-  2. In _dispatch_mode (~line 1708), add before the fpath_reacq entry:
-       if mode == "fpath_coh":
-           return track_fused_path_identity(clip, packs, lock, frame_wh=frame_wh,
-                                            coh_w=FPATH_COH_W_DEFAULT)
-
-  3. Add "fpath_coh" to ALL_MODES (search for ALL_MODES in identity.py).
-
-TUNING
-
-Sweep coh_w on t5 and t8 first (fast, ~2 min per run):
-
-  python -m ld.detect.eval_modes \
-    --weights data/detect/runs/yolov8n_single_combined/weights/best.pt \
-    --modes fpath_coh --clips t5 t8
-
-  Edit FPATH_COH_W_DEFAULT and re-run for values: 0.3, 0.5, 1.0, 1.5, 2.0.
-  Pick the value that maximises t5+t8 sum with no clip below fpath baseline.
-
-Full 10-clip LOO once a good value is found:
-
-  python -m ld.detect.loo \
-    --weights data/detect/runs/yolov8n_single_combined/weights/best.pt \
-    --modes fpath fpath_coh
-
-SUCCESS CRITERIA
-- LOO mean(fpath_coh) > 0.855 (current fpath LOO)
-- t5 improves from 0.718
-- t8 improves from 0.664
-- t1 improves from 0.806 (has one teleport at f500)
-- No clip regresses by more than 0.005 vs fpath
-- t4 stays within +/-0.010 of 0.729 (its loss is detection gap, emission cannot fix it)
-
-WHAT TO EXPECT
-- Teleport frames (oracle=1, far fake wins mass): coherence discriminates because the
-  real shape's YOLO box contains features moving coherently; the fake's box contains
-  random jitter. Expected lift: +0.03-0.08 on LOO mean.
-- Detection-gap frames (oracle=0): no real shape box to score, no change expected
-  on t4 f383, t8 f232, t8 f634.
-- Risk: if coh_w > 1.5, a fake near a genuine independent-motion region can be falsely
-  boosted. Monitor t2/t7/t10 (currently 0.963/0.993/0.957) for any regression -- that
-  is the signal coh_w is too aggressive.
+**Net:** `fpath_fuse` is at/near the ceiling of what *motion-only* evidence + a single
+forward Viterbi pass can extract. Reaching 0.90 needs **either a new orthogonal
+discriminator** (so bad locks become distinguishable from good ones) **or better detection
+on the confusable frames** — not another trellis/escape tweak. Confirm this framing with a
+fresh `fuse_probe`/`step3_gate` run before investing; do not trust these numbers blind.
 
 ---
 
-Fix 2 -- Detection gap coverage (retrain) -- do after Fix 1
-============================================================
-Target: ~165 frames where oracle_hit=0 (t4 f383-520, t8 f226-253, t8 f634-644).
+## Future experiments (gated, highest-EV first)
 
-These frames have oracle_hit=0: the real shape is not in any YOLO box. No emission fix
-helps. The only lever is detector coverage.
+Discipline for every item: **gate first** (cheap read-only probe — does the signal exist?),
+then build only if the gate passes, then accept only if **LOO mean improves with no
+per-clip regression vs 0.876** (`python -m ld.detect.loo`). Mirror the
+`fuse_probe → fuse_sweep` pattern. Probes are "run, read, decide, delete-or-keep".
 
-HOW TO FIND THE MISSING POSITIONS
+### EXP-1 — Appearance/texture channel orthogonal to motion (HIGHEST EV)
+**Hypothesis:** the real shape's *interior* changes frame-to-frame (it rotates/moves
+independently) while a fake's interior is rigid with the sheet. A rotation-aware appearance
+descriptor gives a top-1 signal where motion fails — exactly t8's gap.
+- **Why new:** NCC failed (translation-only, de-correlates under rotation); log-polar
+  phase-corr was regime-coupled. The new angle is a **rotation-INVARIANT magnitude
+  descriptor** (ring/annular intensity histogram, Fourier-Mellin magnitude, or Zernike
+  moments) of each box ROI, compared frame-to-frame *after de-rotating by the global sheet
+  rotation* (from the paper affine). Score = descriptor change; the real shape changes more.
+- **Gate (`exp1_appearance_probe.py`):** per box on t8/t1 miss frames, compute the
+  descriptor-change; does the real (GT) box rank top-1/top-3? If top-1 > 0.4 on t8 (where
+  motion gives 0.32), it's a genuinely complementary channel → build it as a 4th additive
+  emission term and re-sweep weights. If top-1 ≈ motion, drop it.
+- **Files:** new probe; if it passes, add `appearance_w` term in
+  `track_fused_path_identity` emission alongside cmass/curl; extend `fuse_sweep`.
 
-  python3 <<'EOF'
-  import csv, pathlib
-  BASE = pathlib.Path("data/detect/eval")
-  for clip, gaps in [("t4", [(383, 420)]), ("t8", [(232, 242), (634, 644)])]:
-      path = BASE / f"{clip}_cropped_trimmed__fpath.csv"
-      rows = {int(r["idx"]): r for r in csv.DictReader(open(path))}
-      print(f"\n{clip} detection gap frames:")
-      for start, end in gaps:
-          for f in range(start, end+1):
-              if f in rows and rows[f]["oracle_hit"] == "0":
-                  r = rows[f]
-                  print(f"  f{r['idx']}  gt=({float(r['gt_x']):.1f},{float(r['gt_y']):.1f})")
-  EOF
+### EXP-2 — Targeted detector annotation on confusable frames (PROVEN LEVER)
+**Hypothesis:** tighter/cleaner boxes on the t8/t1 confusable frames change the coherence
+computation and reduce identity ambiguity. Detection improvement is the one lever with a
+track record (oracle 0.915 → 0.958 historically lifted identity in lock-step).
+- **Gate:** inspect the t8 teleport-lock frames (f284–380 region per the old taxonomy;
+  re-derive from `data/detect/eval/t8_cropped_trimmed__fpath_fuse.csv`). Is the real box
+  missing, oversized, or merged with a neighbour? If detection is sloppy there → annotate.
+- **Build:** extract those frames via `annotate_s.py`, add ~5–10 targeted boxes, retrain
+  `yolov8n_single_combined` (see CLAUDE.md "How to train"). Re-run full `eval_modes`.
+- **Risk:** low (additive examples); the lesson is targeted coverage, not schema changes.
 
-Extract and annotate those exact frames:
+### EXP-3 — Evidence-hysteresis switch WITHOUT the far requirement (CHEAP, MEDIUM EV)
+**Hypothesis:** the far-jump reacquire died because t1's creep is *adjacent*; a switch that
+fires on *accumulated* coherent-mass dominance regardless of distance could catch adjacent
+creep before it locks. (This is `accum`'s mechanism layered on the fuse trellis.)
+- **Gate (`exp3_switch_probe.py`):** on t1/t5/t8 miss frames, does the box with the highest
+  *long-window* (e.g. 24–40 frame) accumulated coherent-mass sit on GT — *dropping the far
+  filter* that step3_gate imposed? step3_gate's on-GT (ignoring far) was t1 0.39 / t5 0.40 /
+  t8 0.29 at win12; test whether a LONGER window raises on-GT materially. Only worth building
+  if on-GT clears ~0.5 on at least one laggard.
+- **Build:** add a hysteresis override to `track_fused_path_identity`: maintain per-box
+  leaky-integrated coherent-mass; if a challenger leads the path's box by margin M for K
+  consecutive frames, switch + reset path memory. LOO-tune (M, K, window) conservatively to
+  protect strong clips. Reuse `accum`'s constants as a starting point.
 
-  python -m ld.detect.annotate_s   # extracts new frames + opens annotator
+### EXP-4 — Learned per-box discriminator, physically-motivated features (HIGH EFFORT)
+**Hypothesis:** no single hand-set channel separates the real shape, but a small model over
+several orthogonal features might. logreg overfit before — the fix is heavy regularization +
+strict leave-one-CLIP-out and physically-motivated features only.
+- **Features per box:** coherent-mass, curl, paper-residual, mass, size-consistency vs
+  neighbours, appearance-change (from EXP-1), temporal persistence.
+- **Gate:** leave-one-clip-out AUC for "is real shape" must beat the best single feature by a
+  clear margin on held-out clips, or it's overfitting again.
+- **Only attempt after EXP-1** (it supplies the orthogonal feature that makes this viable).
 
-Navigate to the frame numbers above (p/n keys). Annotate the real shape box. Full class only.
-
-Retrain:
-  python -m ld.detect.build_s_dataset \
-      --labels-dir data/detect/s_labels_single \
-      --out-dir data/detect/dataset_single_combined
-  python -m ld.detect.train \
-      --data data/detect/dataset_single_combined/dataset.yaml \
-      --name yolov8n_single_combined_v2
-
-SUCCESS CRITERIA
-- oracle_hit improves at the specific gap frames (t4 f383-420, t8 f232-242, t8 f634-644)
-- Oracle LOO mean improves above 0.974
-- No clip's oracle regresses
+### Lower priority / likely dead
+- Bidirectional / longer fixed-lag decode: sustained locks (t8 drifts at f239 and *stays*)
+  exceed any spec-legal lag (~10–15 frames); only helps transient creep. Low EV.
+- Any *global* transition softening / cap: dead (regime-coupled, hurts strong clips).
+- Routing/ensembling existing modes: oracle-router ceiling is only 0.858 < 0.90. Dead.
 
 ---
 
-Fix 3 -- Dense pixel differencing complementarity check (exploratory, after Fix 1)
-===================================================================================
+## How to work here
 
-Memory entry ld-dense-differencing-promising.md says warp-and-diff beats coherence on
-t8 miss frames. The question is whether it corrects different frames.
-
-After fpath_coh is shipped:
-1. Collect per-frame results for fpath_coh on all clips
-2. Find frames still wrong under fpath_coh (within_r=0, oracle=1)
-3. For those frames, check if warp-and-diff ranks the GT box higher
-4. If >60% of residual-miss frames are corrected by dense diff and NOT by coherence:
-   build as a second multiplicative emission term
-5. If <30% new lift: skip
-
----
-
-Recommended Execution Order
-
-1. Run verification diagnostic (5 min) -- confirm coherence separates at t5 f328, t8 f284
-2. Implement box_coherence + fpath_coh (30 min)
-3. Sweep coh_w on t5/t8, pick best (10 min)
-4. Full LOO to confirm no regression (15 min)
-5. If t4 still lags after Fix 1: retrain with gap-frame annotation (Fix 2)
-6. After Fix 1 is stable: run dense diff complementarity check (Fix 3)
-
-Do NOT revisit:
-- trans_cap / fpath_reacq -- regime-coupling confirmed, dead end
-- prox_w > 0 -- hurts every clip confirmed, dead end
-- Lock bug -- closed, new detector resolves it
-- Two-class YOLO -- halves instances per class, dead end
-- Velocity cap / confirm-gate -- wrong lever for teleport failure mode
+- **Eval:** `python -m ld.detect.eval_modes --weights data/detect/runs/yolov8n_single_combined/weights/best.pt`
+  (full board, ~18 min, cache-backed). Subset: `--modes fpath_fuse --clips t8 t5` (overwrites
+  LEADERBOARD.md — regenerate full board before committing). Honest generalization:
+  `python -m ld.detect.loo`.
+- **Per-frame forensics:** `data/detect/eval/<clip>__<mode>.csv` (idx, state, x/y, gt, err,
+  within_r, oracle_err, oracle_hit). Read these to characterize a failure before coding.
+- **Bar:** accept a change only if LOO mean improves with **no per-clip regression** vs 0.876.
+- **Discipline:** strictly causal for anything shipped; gate every idea with a read-only probe
+  before building; record dead ends in CLAUDE.md.
+- **Key files:** `ld/detect/identity.py` (modes, `track_fused_path_identity`, `_dispatch_mode`,
+  `ALL_MODES`), `ld/detect/fuse_sweep.py` (LOO weight/window sweep harness, channels
+  precomputed once), `ld/detect/fuse_probe.py` / `ld/detect/step3_gate.py` (this session's
+  gates — templates for new ones), `ld/vision/motion.py` (`estimate_motion`, `box_coherence`),
+  `ld/detect/eval_modes.py`, `ld/detect/loo.py`.
