@@ -1430,6 +1430,25 @@ FPATH_REACQUIRE_MASS_FRAC = 0.3 # min normalised mass for reacquire target (do-n
 FPATH_TRANS_CAP = 8.0     # cap on transition penalty in radii² — limits lock-in depth
 FPATH_COH_W = 0.0         # coherence emission weight; 0 = pure mass (current default)
 FPATH_COH_W_DEFAULT = 1.8 # used by fpath_coh mode; swept on all 10 clips, peak at 1.8
+# Additive multi-channel emission (mode "fpath_fuse"). fuse_probe (2026-06-19) showed
+# t4/t5 are emission-channel failures the mass-only emission can't rank #1: the WINDOWED
+# coherent-mass ranks the real box #1 on 60% of t4 misses, the rotational curl on 50% of
+# t5 misses (vs mass ~43%), and coherence top-3 recall on miss frames is 0.842 (mass 0.803).
+# Max-fusion is a dead end (probe top-1 0.22 -- whichever channel spikes on a fake wins), so
+# the channels are combined ADDITIVELY: emission = norm(mass) + cmass_w*norm(cohmass) +
+# curl_w*norm(curl). Each channel is normalized cross-frame by its own running peak EMA (NOT
+# per-frame max) so a genuinely weak frame still yields low emission everywhere and the
+# transition prior carries the path (preserves fpath's coast behavior, the load-bearing trick).
+FPATH_CMASS_W = 0.0       # additive windowed coherent-mass weight (0 = off)
+FPATH_CURL_W = 0.0        # additive windowed rotational-curl weight (0 = off)
+FPATH_FUSE_WIN = 12       # causal window (frames) coherent-mass / curl accumulate over
+# Tuned defaults for the fpath_fuse mode. LOO sweep (fuse_sweep.py, 2026-06-19) over
+# cmass_w x curl_w: this is the no-per-clip-regression corner the LOO selector chose for
+# 7/10 folds. In-sample mean 0.876 (pure-mass fpath 0.797; fpath_coh 0.825), worst-clip
+# delta +0.004 vs pure mass. cmass is the big lever (t4 +0.11, t5 +0.14); curl a small
+# complement that removes the t2 regression cmass-alone would cause.
+FPATH_FUSE_CMASS_W = 1.5
+FPATH_FUSE_CURL_W = 0.5
 
 
 def track_fused_path_identity(clip: str | Path, packs: list[FusionPack],
@@ -1444,6 +1463,9 @@ def track_fused_path_identity(clip: str | Path, packs: list[FusionPack],
                               reacquire: bool = False,
                               trans_cap: float | None = None,
                               coh_w: float = FPATH_COH_W,
+                              cmass_w: float = FPATH_CMASS_W,
+                              curl_w: float = FPATH_CURL_W,
+                              fuse_win: int = FPATH_FUSE_WIN,
                               ) -> tuple[list[TrackPoint], list[int | None], int, float]:
     """Causal Viterbi-style integrator fusing saliency mass + CV-proximity prior.
 
@@ -1470,6 +1492,11 @@ def track_fused_path_identity(clip: str | Path, packs: list[FusionPack],
     active = False
     lost = 0        # frames since last trusted Viterbi pick
     mass_scale = 0.0   # running EMA of per-frame peak absolute mass (cross-frame conf)
+    cmass_scale = 0.0  # same, for the additive windowed coherent-mass channel
+    curl_scale = 0.0   # same, for the additive windowed rotational-curl channel
+    from collections import deque
+    use_fuse = cmass_w > 0 or curl_w > 0
+    ovecs_hist: deque = deque(maxlen=fuse_win) if use_fuse else None
 
     track: list[TrackPoint] = []
     locked_hist: list[int | None] = []
@@ -1516,12 +1543,31 @@ def track_fused_path_identity(clip: str | Path, packs: list[FusionPack],
                 coh = np.array([box_coherence(b, fld) for b in p.boxes], np.float32)
             else:
                 coh = np.zeros(len(p.boxes), np.float32)
+            # Additive windowed coherent-mass + curl channels (fpath_fuse). Each is
+            # normalized cross-frame by its own running peak EMA (same trick as mass) so
+            # weak frames stay low-emission everywhere and the transition prior carries.
+            cmass = np.zeros(len(p.boxes), np.float32)
+            curl = np.zeros(len(p.boxes), np.float32)
+            if ovecs_hist is not None:
+                ovecs_hist.append((fld.outliers, fld.outlier_vectors))
+                win = list(ovecs_hist)
+                if cmass_w > 0:
+                    cm = np.array([_box_coherent_mass(b, win) for b in p.boxes], np.float32)
+                    cpk = float(cm.max())
+                    cmass_scale = cpk if cmass_scale == 0.0 else max(cpk, mass_ema * cmass_scale + (1 - mass_ema) * cpk)
+                    cmass = cm / cmass_scale if cmass_scale > 0 else cm
+                if curl_w > 0:
+                    cu = np.array([_box_rotational_curl(b, win) for b in p.boxes], np.float32)
+                    upk = float(cu.max())
+                    curl_scale = upk if curl_scale == 0.0 else max(upk, mass_ema * curl_scale + (1 - mass_ema) * upk)
+                    curl = cu / curl_scale if curl_scale > 0 else cu
             pred = pos + vel
             emis = np.empty(len(cents), np.float32)
             for i, (cx, cy) in enumerate(cents):
                 d = math.hypot(cx - pred[0], cy - pred[1])
                 prox = math.exp(-(d / (prox_sigma * radius)) ** 2)
-                emis[i] = mass[i] * (1.0 + coh_w * coh[i]) + prox_w * prox
+                emis[i] = (mass[i] * (1.0 + coh_w * coh[i])
+                           + cmass_w * cmass[i] + curl_w * curl[i] + prox_w * prox)
             if prev_alpha is None or prev_cents is None:
                 alpha = emis.copy()
             else:
@@ -1691,7 +1737,7 @@ _PAPER_PICK_MODES = (
 
 # All selectable modes, in leaderboard order. Single source of truth shared by
 # run_clip's argparse and the eval_modes harness so the two never drift.
-ALL_MODES = ("chain", *_PAPER_PICK_MODES, "outlier", "accum", "field", "field_lag", "field_coh", "fpath", "fpath_coh", "fpath_reacq")
+ALL_MODES = ("chain", *_PAPER_PICK_MODES, "outlier", "accum", "field", "field_lag", "field_coh", "fpath", "fpath_coh", "fpath_reacq", "fpath_fuse")
 
 
 def _dispatch_mode(clip: Path, packs: list[FusionPack], lock: LockInfo | None,
@@ -1717,6 +1763,10 @@ def _dispatch_mode(clip: Path, packs: list[FusionPack], lock: LockInfo | None,
     if mode == "fpath_coh":
         return track_fused_path_identity(clip, packs, lock, frame_wh=frame_wh,
                                          coh_w=FPATH_COH_W_DEFAULT)
+    if mode == "fpath_fuse":
+        return track_fused_path_identity(clip, packs, lock, frame_wh=frame_wh,
+                                         cmass_w=FPATH_FUSE_CMASS_W,
+                                         curl_w=FPATH_FUSE_CURL_W)
     if mode == "fpath_reacq":
         return track_fused_path_identity(clip, packs, lock, frame_wh=frame_wh,
                                          reacquire=True,
@@ -1731,7 +1781,7 @@ def _dispatch_mode(clip: Path, packs: list[FusionPack], lock: LockInfo | None,
 
 def run_clip(weights: str | Path, clip: str | Path, *, conf: float = 0.25,
              imgsz: int = 768, use_cache: bool = True, evidence: bool = False,
-             mode: str = "field_coh") -> IdentityReport:
+             mode: str = "fpath_fuse") -> IdentityReport:
     clip = Path(clip)
     name = clip.stem.replace("_cropped_trimmed", "")
     packs = detect_fusion_clip(weights, clip, conf=conf, imgsz=imgsz, use_cache=use_cache)
@@ -1764,12 +1814,12 @@ def main() -> None:
     ap.add_argument("--evidence", action="store_true")
     ap.add_argument("--mode",
                     choices=ALL_MODES,
-                    default="field_coh",
-                    help="field_coh=default, leader (field_lag + coherence far-jump "
-                         "override); field_lag=fixed-lag confirmation smoother over field; "
-                         "field=underlying position-field saliency + YOLO snap; "
-                         "accum=causal per-tracklet evidence + rotation; "
-                         "paper_outlier_rank/paper/etc=older per-frame baselines; "
+                    default="fpath_fuse",
+                    help="fpath_fuse=default, leader (Viterbi path integrator with "
+                         "additive mass+coherent-mass+curl emission); fpath_coh=mass*coh "
+                         "emission; fpath=pure-mass Viterbi; field_coh=field_lag + coherence "
+                         "far-jump override; field/field_lag=position-field saliency + snap; "
+                         "accum/paper_outlier_rank/etc=older baselines; "
                          "see ld/detect/LEADERBOARD.md for the full ranking")
     args = ap.parse_args()
 

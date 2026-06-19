@@ -87,44 +87,47 @@ Output: `data/detect/evidence/<clip>_<mode>.mp4`
 
 2. **Identity** — decides *which* box is the real shape over time. This is the bottleneck and the entire focus of remaining work. Code in `ld/detect/identity.py`.
 
-## Current best: `fpath_coh` (0.825 within_r)
+## Current best: `fpath_fuse` (0.876 within_r)
 
-`fpath_coh` is the leader (verified `eval_modes` regen, 2026-06-19, against `yolov8n_single_combined`). It is the `fpath` Viterbi path integrator with a coherence-bumped emission (`mass*(1+1.8*coh)`). Oracle mean is **0.958** — detection is solved; every remaining loss is identity creep onto an adjacent fake on frames where the real box *is* present.
+`fpath_fuse` is the leader (verified `eval_modes`, 2026-06-19, against `yolov8n_single_combined`). It is the `fpath` Viterbi path integrator with an **additive multi-channel emission**: `norm(mass) + 1.5*norm(coherent_mass) + 0.5*norm(curl)`, each channel scaled cross-frame by its own running peak EMA. Oracle mean is **0.958** — detection is solved; every remaining loss is identity creep onto an adjacent fake on frames where the real box *is* present.
 
 | clip | within_r | oracle |
 |------|----------|--------|
-| t1 | 0.702 | 0.952 |
-| t2 | 0.955 | 0.978 |
-| t3 | 0.810 | 0.918 |
-| t4 | 0.745 | 0.944 |
-| t5 | 0.617 | 0.948 |
-| t6 | 0.877 | 0.970 |
-| t7 | 0.991 | 0.998 |
-| t8 | 0.732 | 0.939 |
-| t9 | 0.909 | 0.973 |
-| t10 | 0.915 | 0.964 |
-| **mean** | **0.825** | **0.958** |
+| t1 | 0.783 | 0.952 |
+| t2 | 0.978 | 0.978 |
+| t3 | 0.852 | 0.918 |
+| t4 | 0.849 | 0.944 |
+| t5 | 0.759 | 0.948 |
+| t6 | 0.922 | 0.970 |
+| t7 | 0.989 | 0.998 |
+| t8 | 0.767 | 0.939 |
+| t9 | 0.924 | 0.973 |
+| t10 | 0.937 | 0.964 |
+| **mean** | **0.876** | **0.958** |
 
-Laggards: **t5 (0.617), t1 (0.702), t8 (0.732), t4 (0.745)** — pure identity creep (oracle ~0.95 on all). An oracle router over *all existing modes* caps at **0.858**, so reaching ≥0.90 needs a better identity signal, not ensembling.
+This was a **+0.051 lift over the previous leader `fpath_coh` (0.825)** with no per-clip regression (only t7 −0.002, near-ceiling noise; conditional within_r 0.860 → 0.913). The biggest gains landed exactly where `fuse_probe` predicted emission-channel failures: **t4 +0.106, t5 +0.138**.
 
-**Failure taxonomy (fuse_probe, 2026-06-19).** On the frames `fpath_coh` misses, which channel ranks the real box #1 splits by clip — no single channel wins everywhere (the persistent causal-key wall):
-- **t4 (coh #1 0.60), t5 (curl #1 0.50)** — *emission-channel* failures: a richer per-frame emission (directional coherence / rotational curl) ranks the real box higher than saliency-mass does. Addressable by a better emission.
-- **t1 (mass #1 0.41, coh demotes it), t8 (mass #1 0.32)** — *path lock-in* failures: mass already ranks the real box in top-3 ~79%, but the Viterbi path won't switch off the fake it locked onto earlier. Needs a lock-in escape, not a new channel. (This is why `fpath_coh` t1 ≈ `fpath` t1 — coherence doesn't help t1.)
-- **Max-fusion of channels is a dead end** (fuse_probe top-1 0.22): max-combining amplifies whichever channel spikes on a fake. Use additive/weighted sums, never max.
-- Coherence is the best *candidate-generator*: top-3 recall on miss frames 0.842 vs mass 0.803.
+Remaining laggards: **t8 (0.767), t5 (0.759), t1 (0.783)** — these are the *path lock-in* cases (mass already ranks the real box top-3 ~79%, but the Viterbi path won't switch off the fake it locked onto). They are the next lever toward ≥0.90.
+
+**Failure taxonomy (fuse_probe, 2026-06-19).** On the frames the trellis misses, which channel ranks the real box #1 splits by clip — no single channel wins everywhere (the persistent causal-key wall). This is what motivated the additive emission and what Viterbi continuity resolves:
+- **t4 (coh #1 0.60), t5 (curl #1 0.50)** — *emission-channel* failures. **Fixed by `fpath_fuse`.**
+- **t1 (mass #1 0.41, coh demotes it), t8 (mass #1 0.32)** — *path lock-in* failures: needs a lock-in escape (coherence/curl-driven reacquire or adaptive transition softening), not a new channel. **Still open.**
+- **Max-fusion of channels is a dead end** (fuse_probe top-1 0.22): max-combining amplifies whichever channel spikes on a fake. The win came from ADDITIVE weighted sums, never max.
+- Coherence (windowed `_box_coherent_mass`, not the instantaneous `box_coherence` `fpath_coh` used) is the dominant channel; curl is a small complement that removes the t2 regression coherent-mass alone would cause.
 
 ## Identity mode stack
 
 | Mode | within_r | Description |
 |------|----------|-------------|
-| `fpath_coh` | **0.825** | `fpath` + coherence-bumped emission (`mass*(1+1.8*coh)`) — current leader |
+| `fpath_fuse` | **0.876** | `fpath` + additive `mass + 1.5*coherent_mass + 0.5*curl` emission — current leader |
+| `fpath_coh` | 0.825 | `fpath` + coherence-bumped emission (`mass*(1+1.8*coh)`) |
 | `fpath` | 0.797 | Viterbi path integrator, pure saliency-mass emission |
 | `fpath_reacq` | 0.783 | `fpath` + global-mass reacquire + transition cap (net regression) |
 | `field_coh` | 0.773 | `field_lag` + coherence far-jump override |
 | `field_lag` | 0.749 | Fixed-lag confirmation smoother (K=8) over `field` |
 | `field` | 0.744 | Motion-saliency peak tracker + YOLO snap |
 
-**fpath / fpath_coh** per frame: a causal forward trellis over YOLO boxes; emission = normalized saliency-mass (× coherence bump for `fpath_coh`), transition penalty = `(jump_in_radii)^2`. Decode = argmax cumulative score → that box's centroid feeds a CV predictor. Locks on and stays locked — an asset on strong clips (t2/t6/t7/t9/t10), a liability on lock-in laggards (t1/t8).
+**fpath / fpath_coh / fpath_fuse** per frame: a causal forward trellis over YOLO boxes; emission = a weighted sum of normalized motion-evidence channels, transition penalty = `(jump_in_radii)^2`. Decode = argmax cumulative score → that box's centroid feeds a CV predictor. `fpath`=mass only; `fpath_coh`=mass×coherence-bump; `fpath_fuse`=additive mass + windowed coherent-mass + curl (each cross-frame-normalized so weak frames stay low-emission and the transition prior carries — the load-bearing coast trick). Locks on and stays locked — an asset on strong clips (t2/t6/t7/t9/t10), a liability on lock-in laggards (t1/t8). Tune weights via `ld/detect/fuse_sweep.py` (LOO, precomputes channels once per clip).
 
 **field** per frame: `motion.py` fits global rigid sheet motion (RANSAC), treats outlier features as evidence, blurs into a saliency field → `OutlierTracker` follows the peak with a gated CV model → snapped to the highest-saliency YOLO box. Snap is load-bearing (field raw ≈ 0.28, field+snap ≈ 0.59). The `field` family beats `fpath_coh` on t1 (0.84 vs 0.70) — no path memory to lock in.
 
@@ -234,10 +237,10 @@ Excluded from evidence renders: `paper`, `paper_outlier`, `paper_outlier_rank`, 
 
 ## Open avenues (highest-EV first)
 
-Target: ≥0.90 mean within_r (from 0.825). Diagnosis below from `fuse_probe` (2026-06-19). `ld/detect/fuse_probe.py` is the gate that produced the taxonomy.
+Target: ≥0.90 mean within_r (now at 0.876, from 0.825). Diagnosis from `fuse_probe` (2026-06-19); `ld/detect/fuse_probe.py` is the gate that produced the taxonomy, `ld/detect/fuse_sweep.py` the LOO weight sweep.
 
-0. **Richer additive emission for the `fpath` trellis (t4/t5 lever).** t4/t5 are emission-channel failures: coherence ranks the real box #1 on 60% of t4 misses, curl on 50% of t5 misses, vs mass ~43%. Replace `fpath_coh`'s multiplicative `mass*(1+λcoh)` with a **weighted additive** emission `norm(mass) + w_c·norm(coh) + w_r·norm(curl)` (NOT max — max-fusion is a dead end, fuse_probe top-1 0.22), swept by LOO. Coherence top-3 recall on miss frames is 0.842 (mass 0.803) — the candidate set is there for Viterbi to resolve.
-1. **Lock-in escape for the trellis (t1/t8 lever).** t1/t8 are NOT emission failures — mass already ranks the real box top-3 ~79%, but the path won't switch off the fake it locked onto. Needs a coherence/curl-driven reacquire (teleport + reset path memory when off the coherent peak ≥K frames) or adaptive transition softening on low-confidence frames. The `field` family already beats `fpath_coh` on t1 (0.84 vs 0.70) precisely because it has no path memory — confirms lock-in is the cause.
+0. ~~**Richer additive emission for the `fpath` trellis (t4/t5 lever).**~~ **DONE — shipped as `fpath_fuse` (0.825 → 0.876).** Additive `mass + 1.5*coherent_mass + 0.5*curl`. t4 +0.106, t5 +0.138 as predicted.
+1. **Lock-in escape for the trellis (t1/t8/t5 lever) — the path to ≥0.90.** t1/t8 are NOT emission failures — mass already ranks the real box top-3 ~79%, but the path won't switch off the fake it locked onto. Needs a coherence/curl-driven reacquire (teleport + reset path memory when off the coherent peak ≥K frames) or adaptive transition softening on low-confidence frames. The `field` family beats the trellis on t1 (0.84 vs 0.78) precisely because it has no path memory — confirms lock-in is the cause. `fpath_reacq` (global-mass reacquire) was a net regression; the new angle is reacquire driven by the *coherent-mass* peak, not raw mass.
 2. **t1/t4 lock bug** — countdown lock lands on wrong shape. Fix in `compute_countdown_lock` / `_pick_lock_box`. Orthogonal to laggard wall.
 
 ## Conventions
