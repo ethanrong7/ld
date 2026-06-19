@@ -234,14 +234,17 @@ Excluded from evidence renders: `paper`, `paper_outlier`, `paper_outlier_rank`, 
 | Box cleanup (border/conf/envelop) | ≤+0.003, some regress | Competing boxes are genuine neighbours, not removable clutter |
 | Top-K / conf filter | Oracle drops | Real shape ranks 15–28 on hard frames; filtering by confidence loses it |
 | Two-class YOLO (shape_full/shape_partial) | Oracle regressed | Insufficient data per class at ~55 frames; single-class + targeted examples wins |
+| Coherence far-jump reacquire on `fpath_fuse` | Gate failed (step3_gate) | On t1/t8 residual misses a far coherent challenger is on-GT+far only 0.085/0.020. t1 creep is onto ADJACENT boxes (far-jump never fires); t8 coherence doesn't point at the real shape (on-GT 0.29). |
+| Transition-penalty cap on `fpath_fuse` | Net −0.025..−0.075 | Caps lock-in depth → small t8 gain (+0.027) but regresses strong clips that depend on lock-in stability (t2 −0.048, t10 −0.023). Regime-coupled, same as `fpath_reacq`. |
 
 ## Open avenues (highest-EV first)
 
 Target: ≥0.90 mean within_r (now at 0.876, from 0.825). Diagnosis from `fuse_probe` (2026-06-19); `ld/detect/fuse_probe.py` is the gate that produced the taxonomy, `ld/detect/fuse_sweep.py` the LOO weight sweep.
 
 0. ~~**Richer additive emission for the `fpath` trellis (t4/t5 lever).**~~ **DONE — shipped as `fpath_fuse` (0.825 → 0.876).** Additive `mass + 1.5*coherent_mass + 0.5*curl`. t4 +0.106, t5 +0.138 as predicted.
-1. **Lock-in escape for the trellis (t1/t8/t5 lever) — the path to ≥0.90.** t1/t8 are NOT emission failures — mass already ranks the real box top-3 ~79%, but the path won't switch off the fake it locked onto. Needs a coherence/curl-driven reacquire (teleport + reset path memory when off the coherent peak ≥K frames) or adaptive transition softening on low-confidence frames. The `field` family beats the trellis on t1 (0.84 vs 0.78) precisely because it has no path memory — confirms lock-in is the cause. `fpath_reacq` (global-mass reacquire) was a net regression; the new angle is reacquire driven by the *coherent-mass* peak, not raw mass.
-2. **t1/t4 lock bug** — countdown lock lands on wrong shape. Fix in `compute_countdown_lock` / `_pick_lock_box`. Orthogonal to laggard wall.
+1. ~~**Lock-in escape for the trellis (coherence reacquire / transition cap).**~~ **Both tested and dead** (see dead-ends table; `step3_gate.py`). t1's creep is onto adjacent boxes (far-jump N/A); t8 is signal-limited (coherence's argmax finds the real box <30% on its miss frames); capping the transition penalty trades the strong clips for marginal laggard gains. The laggards (t8 0.767, t5 0.759, t1 0.783) appear at/near the ceiling of what mass/coherence/curl + Viterbi can extract.
+2. **A genuinely new per-box discriminator — the only remaining path to ≥0.90.** The residual misses are frames where mass/coherence/curl all fail to separate the real shape from a specific adjacent/confident fake (t8 especially). Candidates: an appearance/texture channel that survives the real shape's rotation (NCC failed; needs a rotation-invariant descriptor), a learned per-box discriminator with strong LOO regularization (logreg overfit at this data size), or accum-style evidence hysteresis that does NOT require the challenger to be far (untested on the fuse trellis; but t8's weak coherence limits it). All higher-effort, uncertain-EV.
+3. **t1/t4 lock bug** — countdown lock lands on wrong shape. Fix in `compute_countdown_lock` / `_pick_lock_box`. Orthogonal to laggard wall.
 
 ## Conventions
 

@@ -108,9 +108,11 @@ def _windowed(clipdata, win):
     return out
 
 
-def _decode(frames, radius, start, cmass_w, curl_w, trans_w=FPATH_TRANS_W):
+def _decode(frames, radius, start, cmass_w, curl_w, trans_w=FPATH_TRANS_W,
+            trans_cap=None):
     """Faithful copy of the fpath trellis decode for one weight config (prox_w=0,
-    reacquire off). Returns within_r over scored frames (idx >= start)."""
+    reacquire off). trans_cap bounds the per-step transition penalty (limits lock-in
+    depth). Returns within_r over scored frames (idx >= start)."""
     prev_alpha = None
     prev_cents = None
     last_xy = None
@@ -126,7 +128,10 @@ def _decode(frames, radius, start, cmass_w, curl_w, trans_w=FPATH_TRANS_W):
                     best = -1e18
                     for j, (px, py) in enumerate(prev_cents):
                         dd = math.hypot(cx - px, cy - py) / radius
-                        v = prev_alpha[j] - trans_w * dd * dd
+                        cost = trans_w * dd * dd
+                        if trans_cap is not None:
+                            cost = min(cost, trans_cap)
+                        v = prev_alpha[j] - cost
                         if v > best:
                             best = v
                     alpha[i] = best + emis[i]
