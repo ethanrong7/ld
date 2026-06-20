@@ -1,0 +1,166 @@
+[a01_ld1080p1]
+  [a01_ld1080p1] field              within_r=0.820 median=  24.4px drift@562
+  [a01_ld1080p1] field_lag          within_r=0.773 median=  27.6px drift@557
+  [a01_ld1080p1] field_coh          within_r=0.773 median=  27.6px drift@557
+  [a01_ld1080p1] fpath              within_r=0.729 median=  27.3px drift@461
+  [a01_ld1080p1] fpath_coh          within_r=0.793 median=  25.2px drift@562
+  [a01_ld1080p1] fpath_fuse         within_r=0.793 median=  25.3px drift@562
+  [a01_ld1080p1] fpath_hyst         within_r=0.793 median=  25.3px drift@562
+  [a01_ld1080p1] fpath_hedge        within_r=0.802 median=  24.9px drift@562
+  [a01_ld1080p1] fpath_freeze       within_r=0.841 median=  24.6px drift@562
+[a02_ld1080p2]
+  [a02_ld1080p2] field              within_r=0.952 median=  26.1px drift@796
+  [a02_ld1080p2] field_lag          within_r=0.968 median=  26.7px drift@797
+  [a02_ld1080p2] field_coh          within_r=0.964 median=  26.8px drift@797
+  [a02_ld1080p2] fpath              within_r=0.970 median=  23.9px drift@797
+  [a02_ld1080p2] fpath_coh          within_r=0.956 median=  24.7px drift@796
+  [a02_ld1080p2] fpath_fuse         within_r=0.943 median=  24.7px drift@752
+  [a02_ld1080p2] fpath_hyst         within_r=0.943 median=  24.7px drift@752
+  [a02_ld1080p2] fpath_hedge        within_r=0.955 median=  24.5px drift@752
+  [a02_ld1080p2] fpath_freeze       within_r=0.952 median=  25.0px drift@752
+[a03_ld1440p1]
+  [a03_ld1440p1] field              within_r=0.525 median=  46.0px drift@146
+  [a03_ld1440p1] field_lag          within_r=0.525 median=  47.8px drift@146
+  [a03_ld1440p1] field_coh          within_r=0.522 median=  48.4px drift@146
+  [a03_ld1440p1] fpath              within_r=0.646 median=  38.0px drift@146
+  [a03_ld1440p1] fpath_coh          within_r=0.602 median=  44.2px drift@146
+  [a03_ld1440p1] fpath_fuse         within_r=0.621 median=  38.5px drift@146
+  [a03_ld1440p1] fpath_hyst         within_r=0.602 median=  40.6px drift@146
+  [a03_ld1440p1] fpath_hedge        within_r=0.618 median=  38.5px drift@146
+  [a03_ld1440p1] fpath_freeze       within_r=0.635 median=  38.5px drift@146
+[a04_maplestory_2026_04_19_1_12_53_pm]
+  [a04_maplestory_2026_04_19_1_12_53_pm] field              within_r=0.744 median=  33.6px drift@337
+  [a04_maplestory_2026_04_19_1_12_53_pm] field_lag          within_r=0.736 median=  31.3px drift@252
+  [a04_maplestory_2026_04_19_1_12_53_pm] field_coh          within_r=0.740 median=  31.2px drift@252
+  [a04_maplestory_2026_04_19_1_12_53_pm] fpath              within_r=0.780 median=  30.9px drift@207
+  [a04_maplestory_2026_04_19_1_12_53_pm] fpath_coh          within_r=0.807 median=  29.2px drift@252
+  [a04_maplestory_2026_04_19_1_12_53_pm] fpath_fuse         within_r=0.811 median=  30.2px drift@645
+  [a04_maplestory_2026_04_19_1_12_53_pm] fpath_hyst         within_r=0.813 median=  30.1px drift@645
+  [a04_maplestory_2026_04_19_1_12_53_pm] fpath_hedge        within_r=0.854 median=  32.2px drift@648
+  [a04_maplestory_2026_04_19_1_12_53_pm] fpath_freeze       within_r=0.871 median=  31.1px drift@226
+[a05_maplestory_2026_04_19_2_09_05_pm]
+  [a05_maplestory_2026_04_19_2_09_05_pm] field              within_r=0.895 median=  24.6px drift@674
+  [a05_maplestory_2026_04_19_2_09_05_pm] field_lag          within_r=0.903 median=  24.6px drift@674
+  [a05_maplestory_2026_04_19_2_09_05_pm] field_coh          within_r=0.979 median=  22.4px drift@---
+  [a05_maplestory_2026_04_19_2_09_05_pm] fpath              within_r=0.960 median=  19.1px drift@---
+  [a05_maplestory_2026_04_19_2_09_05_pm] fpath_coh          within_r=0.978 median=  19.5px drift@---
+  [a05_maplestory_2026_04_19_2_09_05_pm] fpath_fuse         within_r=0.957 median=  20.1px drift@958
+  [a05_maplestory_2026_04_19_2_09_05_pm] fpath_hyst         within_r=0.957 median=  20.1px drift@958
+  [a05_maplestory_2026_04_19_2_09_05_pm] fpath_hedge        within_r=0.979 median=  20.3px drift@963
+  [a05_maplestory_2026_04_19_2_09_05_pm] fpath_freeze       within_r=0.979 median=  20.2px drift@963
+[a06_maplestory_2026_05_24_3_04_32_pm]
+  [a06_maplestory_2026_05_24_3_04_32_pm] field              within_r=0.624 median=  41.2px drift@301
+  [a06_maplestory_2026_05_24_3_04_32_pm] field_lag          within_r=0.649 median=  42.0px drift@301
+  [a06_maplestory_2026_05_24_3_04_32_pm] field_coh          within_r=0.634 median=  43.0px drift@301
+  [a06_maplestory_2026_05_24_3_04_32_pm] fpath              within_r=0.584 median=  45.4px drift@322
+  [a06_maplestory_2026_05_24_3_04_32_pm] fpath_coh          within_r=0.529 median=  52.6px drift@307
+  [a06_maplestory_2026_05_24_3_04_32_pm] fpath_fuse         within_r=0.619 median=  38.2px drift@170
+  [a06_maplestory_2026_05_24_3_04_32_pm] fpath_hyst         within_r=0.591 median=  42.0px drift@170
+  [a06_maplestory_2026_05_24_3_04_32_pm] fpath_hedge        within_r=0.603 median=  40.6px drift@170
+  [a06_maplestory_2026_05_24_3_04_32_pm] fpath_freeze       within_r=0.691 median=  31.5px drift@170
+[a07_maplestory_2026_05_24_3_25_21_pm]
+  [a07_maplestory_2026_05_24_3_25_21_pm] field              within_r=0.000 median= 468.6px drift@143
+  [a07_maplestory_2026_05_24_3_25_21_pm] field_lag          within_r=0.000 median= 470.6px drift@143
+  [a07_maplestory_2026_05_24_3_25_21_pm] field_coh          within_r=0.000 median= 470.6px drift@143
+  [a07_maplestory_2026_05_24_3_25_21_pm] fpath              within_r=0.000 median= 499.9px drift@143
+  [a07_maplestory_2026_05_24_3_25_21_pm] fpath_coh          within_r=0.000 median= 487.9px drift@143
+  [a07_maplestory_2026_05_24_3_25_21_pm] fpath_fuse         within_r=0.000 median= 501.1px drift@143
+  [a07_maplestory_2026_05_24_3_25_21_pm] fpath_hyst         within_r=0.000 median= 487.9px drift@143
+  [a07_maplestory_2026_05_24_3_25_21_pm] fpath_hedge        within_r=0.000 median= 487.4px drift@143
+  [a07_maplestory_2026_05_24_3_25_21_pm] fpath_freeze       within_r=0.000 median= 499.3px drift@143
+[a08_maplestory_2026_05_24_5_15_42_pm]
+  [a08_maplestory_2026_05_24_5_15_42_pm] field              within_r=0.757 median=  22.6px drift@441
+  [a08_maplestory_2026_05_24_5_15_42_pm] field_lag          within_r=0.704 median=  24.4px drift@399
+  [a08_maplestory_2026_05_24_5_15_42_pm] field_coh          within_r=0.704 median=  24.4px drift@399
+  [a08_maplestory_2026_05_24_5_15_42_pm] fpath              within_r=0.769 median=  21.8px drift@443
+  [a08_maplestory_2026_05_24_5_15_42_pm] fpath_coh          within_r=0.760 median=  21.9px drift@443
+  [a08_maplestory_2026_05_24_5_15_42_pm] fpath_fuse         within_r=0.754 median=  22.2px drift@443
+  [a08_maplestory_2026_05_24_5_15_42_pm] fpath_hyst         within_r=0.754 median=  22.2px drift@443
+  [a08_maplestory_2026_05_24_5_15_42_pm] fpath_hedge        within_r=0.779 median=  21.9px drift@443
+  [a08_maplestory_2026_05_24_5_15_42_pm] fpath_freeze       within_r=0.769 median=  22.7px drift@443
+[a09_maplestory_2026_05_24_5_51_39_pm]
+  [a09_maplestory_2026_05_24_5_51_39_pm] field              within_r=0.698 median=  25.1px drift@387
+  [a09_maplestory_2026_05_24_5_51_39_pm] field_lag          within_r=0.670 median=  26.8px drift@385
+  [a09_maplestory_2026_05_24_5_51_39_pm] field_coh          within_r=0.670 median=  26.8px drift@385
+  [a09_maplestory_2026_05_24_5_51_39_pm] fpath              within_r=0.681 median=  25.3px drift@387
+  [a09_maplestory_2026_05_24_5_51_39_pm] fpath_coh          within_r=0.700 median=  24.8px drift@387
+  [a09_maplestory_2026_05_24_5_51_39_pm] fpath_fuse         within_r=0.705 median=  24.9px drift@387
+  [a09_maplestory_2026_05_24_5_51_39_pm] fpath_hyst         within_r=0.707 median=  24.8px drift@387
+  [a09_maplestory_2026_05_24_5_51_39_pm] fpath_hedge        within_r=0.713 median=  25.0px drift@387
+  [a09_maplestory_2026_05_24_5_51_39_pm] fpath_freeze       within_r=0.767 median=  23.8px drift@387
+[a10_maplestory_2026_05_24_9_04_20_pm]
+  [a10_maplestory_2026_05_24_9_04_20_pm] field              within_r=0.713 median=  33.5px drift@158
+  [a10_maplestory_2026_05_24_9_04_20_pm] field_lag          within_r=0.685 median=  33.5px drift@155
+  [a10_maplestory_2026_05_24_9_04_20_pm] field_coh          within_r=0.685 median=  33.5px drift@155
+  [a10_maplestory_2026_05_24_9_04_20_pm] fpath              within_r=0.737 median=  33.6px drift@158
+  [a10_maplestory_2026_05_24_9_04_20_pm] fpath_coh          within_r=0.785 median=  33.0px drift@158
+  [a10_maplestory_2026_05_24_9_04_20_pm] fpath_fuse         within_r=0.814 median=  31.5px drift@158
+  [a10_maplestory_2026_05_24_9_04_20_pm] fpath_hyst         within_r=0.793 median=  31.7px drift@158
+  [a10_maplestory_2026_05_24_9_04_20_pm] fpath_hedge        within_r=0.802 median=  31.3px drift@165
+  [a10_maplestory_2026_05_24_9_04_20_pm] fpath_freeze       within_r=0.828 median=  29.0px drift@165
+[a11_maplestory_2026_05_25_1_24_55_pm]
+  [a11_maplestory_2026_05_25_1_24_55_pm] field              within_r=0.897 median=  18.5px drift@673
+  [a11_maplestory_2026_05_25_1_24_55_pm] field_lag          within_r=0.887 median=  19.7px drift@671
+  [a11_maplestory_2026_05_25_1_24_55_pm] field_coh          within_r=0.886 median=  19.7px drift@671
+  [a11_maplestory_2026_05_25_1_24_55_pm] fpath              within_r=0.902 median=  17.9px drift@612
+  [a11_maplestory_2026_05_25_1_24_55_pm] fpath_coh          within_r=0.941 median=  17.7px drift@---
+  [a11_maplestory_2026_05_25_1_24_55_pm] fpath_fuse         within_r=0.956 median=  17.6px drift@---
+  [a11_maplestory_2026_05_25_1_24_55_pm] fpath_hyst         within_r=0.951 median=  17.6px drift@---
+  [a11_maplestory_2026_05_25_1_24_55_pm] fpath_hedge        within_r=0.902 median=  17.8px drift@501
+  [a11_maplestory_2026_05_25_1_24_55_pm] fpath_freeze       within_r=0.916 median=  17.9px drift@501
+[a12_maplestory_2026_05_25_10_42_47_pm]
+  [a12_maplestory_2026_05_25_10_42_47_pm] field              within_r=0.410 median=  91.9px drift@167
+  [a12_maplestory_2026_05_25_10_42_47_pm] field_lag          within_r=0.423 median=  95.4px drift@167
+  [a12_maplestory_2026_05_25_10_42_47_pm] field_coh          within_r=0.455 median=  83.5px drift@167
+  [a12_maplestory_2026_05_25_10_42_47_pm] fpath              within_r=0.860 median=  32.1px drift@272
+  [a12_maplestory_2026_05_25_10_42_47_pm] fpath_coh          within_r=0.866 median=  31.9px drift@272
+  [a12_maplestory_2026_05_25_10_42_47_pm] fpath_fuse         within_r=0.804 median=  33.2px drift@172
+  [a12_maplestory_2026_05_25_10_42_47_pm] fpath_hyst         within_r=0.708 median=  35.4px drift@172
+  [a12_maplestory_2026_05_25_10_42_47_pm] fpath_hedge        within_r=0.735 median=  36.0px drift@173
+  [a12_maplestory_2026_05_25_10_42_47_pm] fpath_freeze       within_r=0.762 median=  32.1px drift@272
+[a13_maplestory_2026_05_25_2_14_31_pm]
+  [a13_maplestory_2026_05_25_2_14_31_pm] field              within_r=0.618 median=  37.9px drift@158
+  [a13_maplestory_2026_05_25_2_14_31_pm] field_lag          within_r=0.618 median=  38.1px drift@158
+  [a13_maplestory_2026_05_25_2_14_31_pm] field_coh          within_r=0.680 median=  34.3px drift@158
+  [a13_maplestory_2026_05_25_2_14_31_pm] fpath              within_r=0.711 median=  33.8px drift@158
+  [a13_maplestory_2026_05_25_2_14_31_pm] fpath_coh          within_r=0.777 median=  30.6px drift@158
+  [a13_maplestory_2026_05_25_2_14_31_pm] fpath_fuse         within_r=0.798 median=  30.2px drift@158
+  [a13_maplestory_2026_05_25_2_14_31_pm] fpath_hyst         within_r=0.768 median=  31.8px drift@158
+  [a13_maplestory_2026_05_25_2_14_31_pm] fpath_hedge        within_r=0.782 median=  31.4px drift@164
+  [a13_maplestory_2026_05_25_2_14_31_pm] fpath_freeze       within_r=0.821 median=  29.3px drift@164
+[a14_maplestory_2026_05_25_7_42_36_pm]
+  [a14_maplestory_2026_05_25_7_42_36_pm] field              within_r=0.765 median=  35.8px drift@291
+  [a14_maplestory_2026_05_25_7_42_36_pm] field_lag          within_r=0.747 median=  35.3px drift@289
+  [a14_maplestory_2026_05_25_7_42_36_pm] field_coh          within_r=0.734 median=  34.4px drift@147
+  [a14_maplestory_2026_05_25_7_42_36_pm] fpath              within_r=0.687 median=  38.9px drift@140
+  [a14_maplestory_2026_05_25_7_42_36_pm] fpath_coh          within_r=0.768 median=  30.9px drift@140
+  [a14_maplestory_2026_05_25_7_42_36_pm] fpath_fuse         within_r=0.815 median=  27.8px drift@140
+  [a14_maplestory_2026_05_25_7_42_36_pm] fpath_hyst         within_r=0.815 median=  27.8px drift@140
+  [a14_maplestory_2026_05_25_7_42_36_pm] fpath_hedge        within_r=0.821 median=  26.7px drift@140
+  [a14_maplestory_2026_05_25_7_42_36_pm] fpath_freeze       within_r=0.852 median=  24.5px drift@140
+[a15_maplestory_2026_05_25_8_07_11_pm]
+  [a15_maplestory_2026_05_25_8_07_11_pm] field              within_r=0.731 median=  41.1px drift@204
+  [a15_maplestory_2026_05_25_8_07_11_pm] field_lag          within_r=0.722 median=  41.5px drift@202
+  [a15_maplestory_2026_05_25_8_07_11_pm] field_coh          within_r=0.725 median=  41.0px drift@202
+  [a15_maplestory_2026_05_25_8_07_11_pm] fpath              within_r=0.765 median=  37.2px drift@204
+  [a15_maplestory_2026_05_25_8_07_11_pm] fpath_coh          within_r=0.737 median=  40.1px drift@204
+  [a15_maplestory_2026_05_25_8_07_11_pm] fpath_fuse         within_r=0.809 median=  36.0px drift@160
+  [a15_maplestory_2026_05_25_8_07_11_pm] fpath_hyst         within_r=0.811 median=  35.6px drift@160
+  [a15_maplestory_2026_05_25_8_07_11_pm] fpath_hedge        within_r=0.814 median=  36.0px drift@161
+  [a15_maplestory_2026_05_25_8_07_11_pm] fpath_freeze       within_r=0.830 median=  33.7px drift@161
+
+========================================================================
+LEADERBOARD (mean across 15 clips)
+========================================================================
+mode                within_r  within1.5r    cond   med_px   drift
+fpath_freeze           0.768       0.847   0.819     29.0    0.19
+fpath_fuse             0.747       0.832   0.814     30.2    0.28
+fpath_hedge            0.744       0.827   0.801     31.3    0.22
+fpath_hyst             0.734       0.816   0.800     30.1    0.28
+fpath_coh              0.733       0.817   0.799     30.6    0.27
+fpath                  0.719       0.803   0.783     32.1    0.22
+field_coh              0.677       0.772   0.726     33.5    0.22
+field                  0.677       0.761   0.733     33.6    0.21
+field_lag              0.667       0.762   0.715     33.5    0.20
+
+leaderboard -> C:\Users\Owner\Documents\Github\ld\ld\detect\LEADERBOARD.md

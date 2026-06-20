@@ -117,6 +117,35 @@ Remaining laggards: **t5 (0.858), t4 (0.880), t1 (0.895)** — the freeze cleare
 - **Max-fusion of channels is a dead end** (fuse_probe top-1 0.22): max-combining amplifies whichever channel spikes on a fake. The win came from ADDITIVE weighted sums, never max.
 - Coherence (windowed `_box_coherent_mass`, not the instantaneous `box_coherence` `fpath_coh` used) is the dominant channel; curl is a small complement that removes the t2 regression coherent-mass alone would cause.
 
+## Held-out validation: `additional_evidence` (15 clips, 2026-06-20)
+
+A second, never-trained-on clip set was built from the raw captures in `data/` (the 12 `MapleStory - ….mp4`
+files + `ld1080p1/p2` + `ld1440p1`) by `make_additional_evidence.py` (repo root, standalone). It crops each
+raw capture to just the lie-detector board (largest tan rectangle, aspect ~1.49; auto-handles
+720p/768p/1080p/1440p → resize to **744×498**) and trims to the minigame (countdown board appears → board
+removed at success), producing `data/additional_evidence/a01…a15_<source>.mp4` in the **exact s/t format**
+(744×498, 60fps, no audio, GT crosshair retained). GT is the in-game green crosshair (auto-derived, noisier
+than hand labels), stripped by `strip_pointer` before detection like the s/t clips.
+
+**Result — `fpath_freeze` leads here too, and the whole ranking reproduces t1–t10.** Scored over the 13
+valid clips (a03 + a07 excluded: incomplete/static GT). Saved to `ld/detect/LEADERBOARD_additional_evidence.md`
+(canonical t1–t10 board is `LEADERBOARD.md`, backed up to `LEADERBOARD_t1_t10.md`).
+
+| mode | add-evidence (valid-13) | t1–t10 |
+|------|------------------------:|-------:|
+| `fpath_freeze` | **0.837** | 0.932 |
+| `fpath_fuse` | 0.814 | 0.876 |
+| `fpath_hedge` | 0.811 | 0.899 |
+| `fpath_hyst` / `fpath_coh` | 0.800 | 0.878 / 0.825 |
+| `fpath` | 0.780 | 0.797 |
+| `field_coh` / `field` / `field_lag` | 0.741 / 0.740 / 0.730 | 0.773 / 0.744 / 0.749 |
+
+Absolute numbers are lower (noisier auto-GT, harder/odd clips like the 1440p-downscaled a03 whose oracle is
+0.942 but identity ~0.64), but the **fpath-family > field-family ordering and `fpath_freeze` on top hold
+exactly** — independent cross-dataset confirmation of the lineage. **No method falls below 0.70 on valid GT**
+(weakest `field_lag` 0.730), so the field family is dominated-but-not-prunable. Evidence renders:
+`data/detect/evidence/aNN_*_fpath_freeze.mp4`.
+
 ## Identity mode stack
 
 The leaderboard default is now the **9 competitive modes** (`identity.BOARD_MODES`); the other 7 in `ALL_MODES` are permanently dominated and retired from routine regens (still runnable via `eval_modes --modes <name>` — see Dead ends).
@@ -293,6 +322,7 @@ Remaining ideas, all LOW-EV given the above — gate hard, expect little:
 | `ld/detect/resid_freeze_probe.py` | `fpath_freeze` gate + τ/lag/consec LOO sweep (residual-gated decode freeze) |
 | `ld/detect/sheet_residual_probe.py` / `resid_override_probe.py` | EXP-Q1 residual measurement / EXP-Q2b override gate (residual-as-ranking, dead) |
 | `ld/detect/render_evidence.py` | Per-clip overlay video renderer |
+| `make_additional_evidence.py` | (repo root, standalone) crop+trim raw `data/*.mp4` captures → `data/additional_evidence/` in s/t format (held-out validation set) |
 | `ld/detect/annotate_s.py` | Frame extraction + drag-to-draw box annotator |
 | `ld/detect/build_s_dataset.py` | Builds YOLO dataset from s_frames/s_labels |
 | `ld/detect/train.py` | Fine-tunes YOLOv8n from COCO-pretrained weights |
