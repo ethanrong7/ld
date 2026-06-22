@@ -1,23 +1,20 @@
-"""Detector-path viability tooling for the LD solver.
+"""YOLO detection + identity tracking for the LD solver.
 
-A lightweight test of the pivot from motion-saliency guessing to multi-object
-detection + rigid-constellation tracking. The question this package answers is
-narrow and cheap: *can a YOLOv8-nano, fine-tuned on a handful of hand-labelled
-frames, cleanly box every shape instance on held-out frames?*
+Two jobs live here:
 
-Workflow (each step is a runnable module; see ``ld/detect/README.md``):
+TRAINING (drop a video in data/ -> retrained detector):
+  1. ``annotate``      -- discover new data/*.mp4, crop to the board, extract 5
+     in-play frames (no countdown/START/success), and single-class box-annotate.
+  2. ``build_dataset`` -- arrange frames/labels into a YOLO tree (clip-wise
+     train/val split) and emit ``dataset.yaml``; prints the train command.
+  3. ``train``         -- fine-tune yolov8n with heavy augmentation (scarce data).
+  4. ``infer``         -- run trained weights on held-out frames for a by-eye check.
 
-  1. ``sample_frames``  -- pull diverse, cursor-stripped frames across t1..t10,
-     writing a manifest with the green-GT location + countdown radius per frame.
-  2. ``annotate``       -- a minimal OpenCV box editor. The real shape's box is
-     pre-filled from the GT crosshair; the human only adds the fake boxes.
-  3. ``build_dataset``  -- arrange images/labels into a YOLO tree (clip-wise
-     train/val split to avoid leakage) and emit ``dataset.yaml``.
-  4. ``train``          -- fine-tune yolov8n with heavy augmentation (data is
-     scarce: ~10 clips only).
-  5. ``infer``          -- run the trained weights on held-out frames and render
-     boxed overlays for a by-eye verdict.
+EVALUATION / EVIDENCE (compare identity methods, render the result):
+  5. ``eval_modes``     -- score identity modes across t1..t10 -> LEADERBOARD.md.
+  6. ``render_evidence``-- overlay video: YOLO boxes + the red-dot cursor guess.
 
-Nothing here touches the green crosshair except as a labelling convenience and
-(downstream) as evaluation GT -- never as a detector input.
+The shipped detector is single-class; the shipped identity method is ``fpath_human``
+(see ``identity.ALL_MODES``). The green crosshair is only a labelling/eval GT,
+never a detector input.
 """

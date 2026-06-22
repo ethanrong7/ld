@@ -1,17 +1,18 @@
-"""Render per-clip evidence videos using the field_coh tracker.
+"""Render per-clip evidence videos for an identity mode.
 
-For each clip, runs field_coh (the current best identity mode), then writes
-an mp4 overlay showing:
+For each clip, runs the chosen identity mode (default fpath_human, the leader),
+then writes an mp4 overlay showing:
   - YOLO boxes (green rectangles)
-  - tracker estimate (red circle = track, orange = coast, grey = acquire)
-  - GT crosshair (cyan marker, visible when available)
+  - the EMITTED POINT as a single prominent filled red dot at (x,y) -- the (x,y)
+    the player's cursor would trace
+  - GT crosshair (cyan marker, GT-only diagnostic) + red miss-line when off
   - HUD: frame index, tracker state, error px
 
-Output: data/detect/evidence/<clip>_field_coh.mp4
+Output: data/detect/evidence/<clip>_<mode>.mp4
 
 Usage:
-    python -m ld.detect.render_evidence --weights data/detect/runs/yolov8n_combined/weights/best.pt
-    python -m ld.detect.render_evidence --weights .../best.pt --clips t1 t7
+    python -m ld.detect.render_evidence --weights data/detect/runs/yolov8n_single_combined/weights/best.pt
+    python -m ld.detect.render_evidence --weights .../best.pt --clips t1 t7 --mode fpath_human
 """
 from __future__ import annotations
 
@@ -32,15 +33,9 @@ from ld.detect.eval_modes import _frame_wh, _default_clips
 
 EVIDENCE_DIR = DETECT_DIR / "evidence"
 
-STATE_COLOR = {
-    "track":   (0, 0, 255),    # red
-    "coast":   (0, 140, 255),  # orange
-    "acquire": (180, 180, 180),# grey
-}
-
 
 def render_clip(weights: str, clip: Path, *, conf: float = 0.25,
-                imgsz: int = 768, mode: str = "field_coh") -> Path:
+                imgsz: int = 768, mode: str = "fpath_human") -> Path:
     clip = Path(clip)
     name = clip.stem.replace("_cropped_trimmed", "")
     print(f"[{name}] loading detections ...")
@@ -77,10 +72,11 @@ def render_clip(weights: str, clip: Path, *, conf: float = 0.25,
         tp = tp_by_idx.get(idx)
         err_str = ""
         if tp is not None and not math.isnan(tp.x):
-            col = STATE_COLOR.get(tp.state, (180, 180, 180))
             cx, cy = int(tp.x), int(tp.y)
-            cv2.circle(frame, (cx, cy), int(radius), col, 2)
-            cv2.circle(frame, (cx, cy), 4, col, -1)
+            # Emitted point: a single prominent filled red dot (the (x,y) the
+            # cursor should trace) with a thin dark outline for contrast.
+            cv2.circle(frame, (cx, cy), 8, (0, 0, 255), -1)
+            cv2.circle(frame, (cx, cy), 8, (0, 0, 0), 1)
             if gt is not None:
                 err = math.hypot(tp.x - gt[0], tp.y - gt[1])
                 err_str = f"  err={err:.0f}px"
@@ -105,15 +101,14 @@ def render_clip(weights: str, clip: Path, *, conf: float = 0.25,
 
 
 def main() -> None:
-    # Modes excluded from evidence renders — well below competitive threshold
-    EXCLUDED_MODES = {"paper", "paper_outlier", "paper_outlier_rank", "chain"}
+    from ld.detect.identity import ALL_MODES
 
     ap = argparse.ArgumentParser(description="Render identity tracker evidence videos")
     ap.add_argument("--weights", default="data/detect/runs/yolov8n_single_combined/weights/best.pt")
     ap.add_argument("--clips", nargs="*", default=None,
                     help="clip stems or paths (default: all t*_cropped_trimmed.mp4)")
-    ap.add_argument("--mode", default="fpath",
-                    help="identity mode to render (default: fpath)")
+    ap.add_argument("--mode", default="fpath_human", choices=ALL_MODES,
+                    help="identity mode to render (default: fpath_human, the leader)")
     ap.add_argument("--conf", type=float, default=0.25)
     ap.add_argument("--imgsz", type=int, default=768)
     args = ap.parse_args()
@@ -127,10 +122,6 @@ def main() -> None:
             clips.append(p)
     else:
         clips = _default_clips()
-
-    if args.mode in EXCLUDED_MODES:
-        raise SystemExit(f"Mode '{args.mode}' is excluded from evidence renders. "
-                         f"Excluded: {sorted(EXCLUDED_MODES)}")
 
     for clip in clips:
         render_clip(args.weights, clip, conf=args.conf,

@@ -19,7 +19,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from ld.config import DETECT_DATASET_DIR, DETECT_RUNS_DIR
+from ld.config import DETECT_RUNS_DIR, TRAIN_DATASET_DIR
 from ld.capture.video_source import VideoSource, open_writer
 from ld.vision.cursor import strip_pointer
 
@@ -105,7 +105,7 @@ def infer_clip(weights: Path, clip: Path, *, conf: float = 0.25,
 def main() -> None:
     ap = argparse.ArgumentParser(description="Run YOLOv8n on held-out frames")
     ap.add_argument("--weights", required=True)
-    ap.add_argument("--source", default=str(DETECT_DATASET_DIR / "images" / "val"),
+    ap.add_argument("--source", default=str(TRAIN_DATASET_DIR / "images" / "val"),
                     help="image folder (default: dataset val split = held-out clips)")
     ap.add_argument("--conf", type=float, default=0.25)
     ap.add_argument("--imgsz", type=int, default=768)

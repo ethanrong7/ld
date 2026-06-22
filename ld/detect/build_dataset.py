@@ -1,75 +1,51 @@
-"""Assemble labelled frames into a YOLO dataset tree.
+"""Build the single-class YOLO dataset from the annotated training frames.
 
-The split is **clip-wise**: whole clips go to either train or val so the val
-set measures generalization to unseen clips (the real question), not memorized
-frames from a clip the model already saw. With ~10 clips, holding out 2 is a
-reasonable 80/20.
-
-Output tree (ultralytics-compatible):
-
-    dataset/
-      images/{train,val}/*.png
-      labels/{train,val}/*.txt
-      dataset.yaml
-
-Only frames that have a label file are included; unlabelled frames are skipped
-with a warning so a half-finished labelling pass still builds.
+Reads cursor-stripped PNGs from data/detect/s_frames/ and their single-class YOLO
+labels from data/detect/s_labels_single/, applies a clip-wise train/val split
+(hold out every Nth clip), and writes the standard YOLO tree + dataset.yaml to
+data/detect/dataset_single_combined/. Then PRINTS the train command (never runs
+it -- verify your labels first).
 
 Usage:
-    python -m ld.detect.build_dataset                  # auto pick ~20% clips for val
-    python -m ld.detect.build_dataset --val-clips t9 t10
+    python -m ld.detect.build_dataset
+    python -m ld.detect.build_dataset --val-every 4
 """
 from __future__ import annotations
 
 import argparse
-import json
-import math
 import shutil
+from collections import defaultdict
 from pathlib import Path
 
-from ld.config import (
-    DETECT_CLASS_NAMES,
-    DETECT_DATASET_DIR,
-    DETECT_FRAMES_DIR,
-    DETECT_LABELS_DIR,
-    DETECT_MANIFEST,
-)
-
-__all__ = ["build_dataset"]
+from ld.config import (DETECT_CLASS_NAMES, TRAIN_DATASET_DIR, TRAIN_FRAMES_DIR,
+                       TRAIN_LABELS_DIR, TRAIN_RUN_NAME)
 
 
-def _label_path(image: str) -> Path:
-    return DETECT_LABELS_DIR / f"{Path(image).stem}.txt"
+def build_dataset(frames_dir: Path = TRAIN_FRAMES_DIR,
+                  labels_dir: Path = TRAIN_LABELS_DIR,
+                  out_dir: Path = TRAIN_DATASET_DIR,
+                  val_every: int = 5) -> Path:
+    frames_dir, labels_dir, out_dir = Path(frames_dir), Path(labels_dir), Path(out_dir)
 
+    samples: list[tuple[str, Path, Path]] = []
+    for png in sorted(frames_dir.glob("*.png")):
+        lbl = labels_dir / f"{png.stem}.txt"
+        if not lbl.exists() or not lbl.read_text().strip():
+            print(f"  skip (no/empty label): {png.name}")
+            continue
+        samples.append((png.stem, png, lbl))
+    if not samples:
+        raise SystemExit(f"No labelled frames in {frames_dir} / {labels_dir}. "
+                         "Run `python -m ld.detect.annotate` first.")
 
-def _auto_val_clips(clips: list[str], frac: float) -> set[str]:
-    ordered = sorted(set(clips), key=lambda c: (len(c), c))
-    k = max(1, round(len(ordered) * frac))
-    return set(ordered[-k:])  # hold out the trailing clips (e.g. t9, t10)
+    # Clip-wise split: group by clip stem, hold out every Nth clip for val.
+    by_clip: dict[str, list] = defaultdict(list)
+    for stem, png, lbl in samples:
+        by_clip[stem.rsplit("_", 1)[0]].append((stem, png, lbl))
+    clips = sorted(by_clip)
+    val_clips = {c for i, c in enumerate(clips) if (i + 1) % val_every == 0}
+    print(f"clips={len(clips)}  val_clips={sorted(val_clips)}")
 
-
-def build_dataset(manifest_path: Path = DETECT_MANIFEST,
-                  out_dir: Path = DETECT_DATASET_DIR,
-                  val_clips: set[str] | None = None,
-                  val_frac: float = 0.2) -> Path:
-    manifest_path = Path(manifest_path)
-    records = json.loads(manifest_path.read_text())
-
-    labelled = [r for r in records if _label_path(r["image"]).exists()]
-    skipped = [r for r in records if not _label_path(r["image"]).exists()]
-    if skipped:
-        print(f"warning: {len(skipped)} frames have no label file (skipped): "
-              + ", ".join(r["image"] for r in skipped[:8])
-              + (" ..." if len(skipped) > 8 else ""))
-    if not labelled:
-        raise SystemExit("No labelled frames found. Run ld.detect.annotate first.")
-
-    clips = [r["clip"] for r in labelled]
-    if val_clips is None:
-        val_clips = _auto_val_clips(clips, val_frac)
-    print(f"val clips: {sorted(val_clips)}")
-
-    out_dir = Path(out_dir)
     for sub in ("images/train", "images/val", "labels/train", "labels/val"):
         d = out_dir / sub
         if d.exists():
@@ -77,43 +53,38 @@ def build_dataset(manifest_path: Path = DETECT_MANIFEST,
         d.mkdir(parents=True, exist_ok=True)
 
     n_train = n_val = 0
-    for r in labelled:
-        split = "val" if r["clip"] in val_clips else "train"
-        img_src = DETECT_FRAMES_DIR / r["image"]
-        lbl_src = _label_path(r["image"])
-        shutil.copy2(img_src, out_dir / f"images/{split}" / r["image"])
-        shutil.copy2(lbl_src, out_dir / f"labels/{split}" / lbl_src.name)
-        if split == "val":
-            n_val += 1
-        else:
-            n_train += 1
+    for clip, entries in by_clip.items():
+        split = "val" if clip in val_clips else "train"
+        for stem, png, lbl in entries:
+            shutil.copy2(png, out_dir / f"images/{split}" / f"{stem}.png")
+            shutil.copy2(lbl, out_dir / f"labels/{split}" / f"{stem}.txt")
+            n_val += split == "val"
+            n_train += split == "train"
 
-    yaml_path = out_dir / "dataset.yaml"
     names = "\n".join(f"  {i}: {n}" for i, n in enumerate(DETECT_CLASS_NAMES))
+    yaml_path = out_dir / "dataset.yaml"
     yaml_path.write_text(
         f"# Auto-generated by ld.detect.build_dataset\n"
         f"path: {out_dir.resolve()}\n"
         f"train: images/train\n"
         f"val: images/val\n"
-        f"names:\n{names}\n"
-    )
-    print(f"train={n_train} val={n_val} -> {out_dir}\nyaml -> {yaml_path}")
-    if n_train < 8:
-        print("NOTE: tiny train set. Expect to lean hard on augmentation; "
-              "a clean val result here is suggestive, not conclusive.")
+        f"names:\n{names}\n")
+    print(f"train={n_train} val={n_val} -> {out_dir}\nyaml -> {yaml_path}\n")
+    print("Verify the labels look right, then train:")
+    print(f"  python -m ld.detect.train --data {yaml_path} --name {TRAIN_RUN_NAME}")
     return yaml_path
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Build a YOLO dataset from labelled frames")
-    ap.add_argument("--manifest", default=str(DETECT_MANIFEST))
-    ap.add_argument("--out-dir", default=str(DETECT_DATASET_DIR))
-    ap.add_argument("--val-clips", nargs="*", default=None,
-                    help="clip stems to hold out for val (default: auto ~20%)")
-    ap.add_argument("--val-frac", type=float, default=0.2)
+    ap = argparse.ArgumentParser(description="Build the single-class YOLO dataset")
+    ap.add_argument("--frames-dir", default=str(TRAIN_FRAMES_DIR))
+    ap.add_argument("--labels-dir", default=str(TRAIN_LABELS_DIR))
+    ap.add_argument("--out-dir", default=str(TRAIN_DATASET_DIR))
+    ap.add_argument("--val-every", type=int, default=5,
+                    help="hold out every Nth clip for val (default 5 = ~20%%)")
     args = ap.parse_args()
-    build_dataset(Path(args.manifest), Path(args.out_dir),
-                  set(args.val_clips) if args.val_clips else None, args.val_frac)
+    build_dataset(Path(args.frames_dir), Path(args.labels_dir),
+                  Path(args.out_dir), args.val_every)
 
 
 if __name__ == "__main__":

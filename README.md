@@ -1,116 +1,110 @@
-# LD Solver
+# LD — MapleStory "Lie Detector" shape tracker
 
-Computer-vision solver for MapleStory Lie Detector clips.
+MapleStory's Lie Detector minigame shows a sheet covered in **identical** shapes.
+One is **real** (you must click it); the rest are **fakes**. Fakes move rigidly with
+the sheet; the real shape moves independently. This repo takes a screen-capture clip
+and outputs the pixel position of the real shape every frame.
 
-## Approach: rigid-paper outlier tracking
+Two stages:
 
-The real and fake shapes are visually identical (same embossed outline), so
-**appearance cannot tell them apart — only motion can**. The background "sheet"
-moves as one near-rigid body, so every fake shares a single global transform;
-the real shape moves independently (its own translation, plus rotation that the
-fakes never have).
+1. **Detection** — a single-class YOLOv8n boxes every shape candidate per frame
+   (`yolov8n_single_combined`, oracle ≈ 0.958 within-radius).
+2. **Identity** — decides *which* box is the real shape over time. The shipped
+   method is **`fpath_human`** (≈ 0.940 within-radius): a causal Viterbi trellis over
+   the boxes with a decode-layer freeze + human-cursor output filter. See
+   [CLAUDE.md](CLAUDE.md) for the full method, lineage, and dead-ends.
 
-The solver exploits this at the **feature-point level**:
+Everything is **strictly causal** (no future frames) so it ports to live play. The
+green crosshair is only ever read as evaluation GT — it is inpainted out
+(`strip_pointer`) before any detection and is never a tracker input.
 
-1. **Acquire** — follow the white countdown shape to seed a position and scale
-   (no crosshair involved).
-2. **Estimate sheet motion** — track features between frames and fit the global
-   rigid transform with RANSAC. Inliers move *with* the paper (fakes/background).
-3. **Outlier saliency** — features that *disagree* with that transform are the
-   independently-moving real shape; their spatial density is the per-frame
-   signal.
-4. **Track** — a recursive constant-velocity tracker gates the saliency around
-   its prediction, coasts when the shape slows (and stops shedding outliers),
-   and re-acquires from the global saliency peak when it falls off-track.
+## Setup
 
-This is point-based, so it is immune to the edge/registration noise that defeats
-pixel-level background subtraction. The green crosshair is **only** ever read to
-score accuracy, never as a solver input.
-
-See `output/debug/*_evidence.mp4` (green = moves-with-paper, red = independent /
-real shape, heat = saliency, cyan = estimate, yellow = GT for reference only).
-
-### Status
-
-Causal and cursor-free. On the `t*` eval clips the estimate lands within
-~1.5× the shape radius for the large majority of frames (median ~50–75px,
-shape radius ~50–60px). Closing the gap to "inside the shape every frame"
-is the next phase (outlier-tracklet linking, a particle filter, and fusing
-the independent-rotation cue for non-circular shapes).
-
-## Getting started
-
+```powershell
+# Windows (PowerShell)
+.venv\Scripts\Activate.ps1
+.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
 ```bash
-git clone <repo-url> ld && cd ld
-
-python3.12 -m venv .venv
-.venv/bin/pip install -r requirements.txt
-export PYTHONPATH=.    # Windows: $env:PYTHONPATH = "."
+# Mac/Linux
+source .venv/bin/activate
+.venv/bin/python -m pip install -r requirements.txt
 ```
 
-Eval clips are **not** in git. Place your own `data/t*_cropped_trimmed.mp4` files
-locally before running any command that reads video.
+Trained weights are **not** committed — train locally (see below). They land at
+`data/detect/runs/yolov8n_single_combined/weights/best.pt`.
 
-For the YOLO detector + identity tracker (trained weights, bbox overlay videos),
-also install `requirements-detect.txt` and follow
-[`ld/detect/README.md`](ld/detect/README.md).
+---
 
-### Quick example: bbox overlay on `t1`
+## Job 1 — Train on new data
 
-After training (or copying weights to `data/detect/runs/yolov8n_combined/weights/best.pt`):
+Drop one or more raw capture videos into `data/`, then run the three steps. The first
+does discovery + cropping + frame extraction + labelling in one interactive session.
 
-```bash
-# Every detected shape boxed (green rectangles + confidence)
-.venv/bin/python -m ld.detect.infer \
-  --weights data/detect/runs/yolov8n_combined/weights/best.pt \
-  --clip data/t1_cropped_trimmed.mp4
+```powershell
+# 1. Extract + label. Auto-discovers new data/*.mp4, crops raw captures to the
+#    744x498 board, pulls 5 in-play frames each (no countdown/START/success frames),
+#    and opens the single-class box annotator. On quit it rebuilds the dataset and
+#    PRINTS the train command (it never trains automatically -- verify your labels first).
+.venv\Scripts\python.exe -m ld.detect.annotate
 
-# Real shape highlighted + track overlay
-.venv/bin/python -m ld.detect.identity \
-  --weights data/detect/runs/yolov8n_combined/weights/best.pt \
-  --inputs data/t1_cropped_trimmed.mp4 --evidence
+# 2. (re)build the YOLO dataset on its own if needed
+.venv\Scripts\python.exe -m ld.detect.build_dataset
+
+# 3. Train (only after you've eyeballed the labels)
+.venv\Scripts\python.exe -m ld.detect.train --name yolov8n_single_combined
 ```
 
-Videos land in `data/detect/runs/` and `data/detect/evidence/` respectively.
+Annotator controls: **drag** = draw a box · **u** = undo · **c** = clear ·
+**n/space** = next · **p** = prev · **s** = save · **q** = quit. Box *every* shape
+on the sheet (the real one is camouflaged among the fakes; identity is decided
+downstream, not by the labels).
 
-## Pointer stripping
+Artifacts: frames → `data/detect/s_frames/`, labels → `data/detect/s_labels_single/`,
+dataset → `data/detect/dataset_single_combined/`.
 
-Used on every frame before processing — inpainting the green GT crosshair (and
-optionally a live mouse disk) so the solver never sees a moving cursor beacon.
-
-`ld/vision/cursor.py`:
-
-- `strip_pointer(frame)` — inpaint green crosshair pixels (t* eval clips)
-- `find_cursor(frame)` — locate green GT centroid (scoring only, never tracking input)
-- `mouse_xy` kwarg — inpaint a disk at the live cursor position
-
-Tunables in `ld/config.py`: `GREEN_*`, `POINTER_INPAINT_RADIUS`, `POINTER_RADIUS`.
-
-## Modules
-
-- `ld/vision/motion.py` — rigid sheet-motion + independent-motion saliency
-- `ld/vision/countdown.py` — white-shape acquisition (seed position + radius)
-- `ld/track/tracker.py` — recursive gated tracker with re-acquisition
-- `ld/solve.py` — acquisition + tracking pipeline (per-frame track)
-- `ld/eval/score.py` — accuracy vs the green GT (evaluation only)
-- `ld/debug/evidence.py` — overlay video explaining the signal
-- `ld/detect/` — YOLO detection + identity tracking (see `ld/detect/README.md`)
-
-Tunables live in `ld/config.py` (`FEAT_*`, `OUTLIER_*`, `SALIENCY_*`, gate /
-velocity / re-acquire settings, `WHITE_*` acquisition, `GREEN_*` GT).
-
-## CLI
-
-```bash
-# original | stripped side-by-side (pointer stripping sanity check)
-python -m ld.main strip-preview --input data/t1_cropped_trimmed.mp4
-
-# run the solver -> per-frame track CSV (frame,x,y,confidence,state)
-python -m ld.main solve --input data/t1_cropped_trimmed.mp4
-
-# run the solver and score it against the green GT
-python -m ld.main score --input data/t1_cropped_trimmed.mp4
-
-# render the rigid-outlier overlay video
-python -m ld.main evidence --input data/t1_cropped_trimmed.mp4
+Quick by-eye check of a trained model:
+```powershell
+.venv\Scripts\python.exe -m ld.detect.infer --weights data/detect/runs/yolov8n_single_combined/weights/best.pt
 ```
+
+---
+
+## Job 2 — Leaderboard + evidence video
+
+```powershell
+# Leaderboard across the t1..t10 eval clips -> ld/detect/LEADERBOARD.md
+# Scores fpath_human (leader), fpath (ablation base), and the oracle ceiling.
+.venv\Scripts\python.exe -m ld.detect.eval_modes --weights data/detect/runs/yolov8n_single_combined/weights/best.pt
+
+# Evidence video: YOLO boxes (green) + the red-dot cursor guess + GT crosshair (cyan)
+.venv\Scripts\python.exe -m ld.detect.render_evidence --weights data/detect/runs/yolov8n_single_combined/weights/best.pt --mode fpath_human
+# -> data/detect/evidence/<clip>_fpath_human.mp4
+```
+
+Run a single mode/clip subset: `eval_modes --modes fpath fpath_human --clips t4 t8`.
+The full `fpath` lineage (`fpath`, `fpath_coh`, `fpath_fuse`, `fpath_hyst`,
+`fpath_hedge`, `fpath_freeze`, `fpath_human`) stays runnable by name for retuning; the
+default leaderboard reports the leader + ablation base + oracle.
+
+A second, never-trained-on validation set lives in `data/additional_evidence/` (built
+by `make_additional_evidence.py`); its board is `ld/detect/LEADERBOARD_additional_evidence.md`.
+
+---
+
+## Layout
+
+| Path | Role |
+|------|------|
+| `ld/detect/annotate.py` | discover + crop + extract + single-class annotate |
+| `ld/detect/build_dataset.py` | build single-class YOLO dataset |
+| `ld/detect/train.py` | fine-tune YOLOv8n |
+| `ld/detect/board_crop.py` | board detection + crop (shared with `make_additional_evidence.py`) |
+| `ld/detect/identity.py` | identity tracker (`fpath`…`fpath_human`), `_dispatch_mode` |
+| `ld/detect/eval_modes.py` | leaderboard harness → `LEADERBOARD.md` |
+| `ld/detect/render_evidence.py` | overlay video (boxes + red-dot guess) |
+| `ld/detect/fusion.py` | cached YOLO detection (`detect_fusion_clip`) |
+| `ld/vision/`, `ld/track/` | motion/saliency, cursor strip, human-cursor output filter |
+
+Tunables live in `ld/config.py`. See **[CLAUDE.md](CLAUDE.md)** for the method, the
+experiment history, and the dead-ends.

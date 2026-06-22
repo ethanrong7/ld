@@ -23,7 +23,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from ld.config import DETECT_DATASET_DIR, DETECT_RUNS_DIR
+from ld.config import DETECT_RUNS_DIR, TRAIN_DATASET_DIR, TRAIN_RUN_NAME
 
 __all__ = ["train"]
 
@@ -38,10 +38,10 @@ AUG = dict(
 )
 
 
-def train(data_yaml: Path = DETECT_DATASET_DIR / "dataset.yaml",
+def train(data_yaml: Path = TRAIN_DATASET_DIR / "dataset.yaml",
           model: str = "yolov8n.pt",
           epochs: int = 100, imgsz: int = 768, batch: int = 8,
-          device: str | None = None, name: str = "yolov8n_probe") -> Path:
+          device: str | None = None, name: str = TRAIN_RUN_NAME) -> Path:
     from ultralytics import YOLO  # lazy: heavy (torch) dependency
 
     data_yaml = Path(data_yaml)
@@ -67,13 +67,13 @@ def train(data_yaml: Path = DETECT_DATASET_DIR / "dataset.yaml",
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Fine-tune YOLOv8n on labelled LD frames")
-    ap.add_argument("--data", default=str(DETECT_DATASET_DIR / "dataset.yaml"))
+    ap.add_argument("--data", default=str(TRAIN_DATASET_DIR / "dataset.yaml"))
     ap.add_argument("--model", default="yolov8n.pt")
     ap.add_argument("--epochs", type=int, default=100)
     ap.add_argument("--imgsz", type=int, default=768)
     ap.add_argument("--batch", type=int, default=8)
     ap.add_argument("--device", default=None, help="cuda | mps | cpu (default: auto)")
-    ap.add_argument("--name", default="yolov8n_probe")
+    ap.add_argument("--name", default=TRAIN_RUN_NAME)
     args = ap.parse_args()
     train(Path(args.data), args.model, args.epochs, args.imgsz, args.batch,
           args.device, args.name)

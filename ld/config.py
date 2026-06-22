@@ -20,6 +20,16 @@ DETECT_RUNS_DIR = DETECT_DIR / "runs"        # ultralytics run outputs
 DETECT_PREFILL_BOX_SCALE = 2.0
 DETECT_CLASS_NAMES = ["shape"]               # single class: "is a shape"
 
+# --- Single-class training pipeline (annotate -> build_dataset -> train) ----
+# The shipped detector is single-class. These are the canonical artifact dirs the
+# training scripts read/write so a new video dropped in data/ flows straight through.
+TRAIN_FRAMES_DIR = DETECT_DIR / "s_frames"             # extracted, cursor-stripped PNGs
+TRAIN_LABELS_DIR = DETECT_DIR / "s_labels_single"      # single-class YOLO .txt labels
+TRAIN_MANIFEST = DETECT_DIR / "s_manifest.json"        # per-frame box metadata
+TRAIN_DATASET_DIR = DETECT_DIR / "dataset_single_combined"  # YOLO tree + dataset.yaml
+TRAIN_RUN_NAME = "yolov8n_single_combined"             # ultralytics run / weights name
+TRAIN_FRAMES_PER_CLIP = 5                              # frames sampled per source video
+
 # --- Green cursor (ground-truth answer marker, HSV) ------------------------
 # Bright pure-green crosshair (~0,255,0 in BGR). Used ONLY as GT for
 # evaluation on the t*-clips; never as a tracking input.
@@ -76,3 +86,19 @@ FIELD_LAG_K = 8              # lookahead/lag frames; LOO-best over {8,12,15}
 FIELD_LAG_CONFIRM = 0.5      # frac of the K-window a candidate box must be the
                              # field pick before committing; LOO-best over
                              # {0.5,0.6,0.75}. Both selected by leave-one-out.
+
+# --- Human-cursor output dynamics (mode "fpath_human", ld/track/humanize.py) -
+# Reshapes the EMITTED (x,y) stream to read like a hand (smooth, momentum-
+# carrying, bounded-velocity) WITHOUT regressing within_r. Pure output-dynamics
+# layer on top of fpath_freeze's chosen point -- identity/freeze/hedge untouched.
+# Tuned by LOO on cursor_physics_probe.py against within_r + smoothness metrics
+# on BOTH boards (t1-t10 and additional_evidence). Defaults below are the shipped
+# config; the probe sweeps around them.
+HUMAN_MIN_CUTOFF = 1.0       # 1-Euro jitter-floor cutoff (Hz); lower = smoother at rest
+HUMAN_BETA = 0.007           # 1-Euro speed coupling; higher = less lag on fast bursts
+HUMAN_DCUTOFF = 1.0          # 1-Euro derivative cutoff (Hz) for the speed estimate
+HUMAN_DEADBAND = 2.0         # px; hold position when the smoothed target moves < this
+HUMAN_PD_K = 0.0             # PD steering stiffness; 0 disables PD (1-Euro only)
+HUMAN_V_MAX = 25.0           # px/frame velocity clamp (just above real-shape p99~18)
+HUMAN_A_MAX = 8.0            # px/frame^2 accel clamp for the PD steer
+HUMAN_LAG = 0               # fixed-lag frames for the centered smoother (0 = causal)

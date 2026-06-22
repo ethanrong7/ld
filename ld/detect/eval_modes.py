@@ -40,7 +40,7 @@ from ld.detect.identity import (ALL_MODES, BOARD_MODES, LockInfo, TrackPoint, _c
 # this many consecutive frames (filters single-frame blips from real loss).
 DRIFT_RUN = 8
 EVAL_DIR = DETECT_DIR / "eval"
-DEFAULT_WEIGHTS = "data/detect/runs/yolov8n_combined/weights/best.pt"
+DEFAULT_WEIGHTS = "data/detect/runs/yolov8n_single_combined/weights/best.pt"
 LEADERBOARD_MD = Path(__file__).resolve().parent / "LEADERBOARD.md"
 
 
@@ -208,6 +208,15 @@ def _write_leaderboard(summaries: list[ModeSummary], rows: list[ModeClipRow],
         lines.append(f"| {i} | `{s.mode}` | {s.mean_within_r:.3f} | "
                      f"{s.mean_within_1p5r:.3f} | {s.mean_conditional:.3f} | "
                      f"{s.median_px:.1f} | {s.mean_drift_frac:.2f} | {s.n_clips} |")
+    # Detector ceiling row: oracle_within_r is mode-independent (depends only on the
+    # detected boxes vs GT), so report it once from any mode's per-clip rows.
+    oracle_rows = [r for r in rows if r.n > 0]
+    if oracle_rows:
+        any_mode = oracle_rows[0].mode
+        omr = [r for r in oracle_rows if r.mode == any_mode]
+        oracle_mean = statistics.mean(r.oracle_within_r for r in omr)
+        lines.append(f"| — | `oracle` (ceiling) | {oracle_mean:.3f} | — | — | — | — | "
+                     f"{len(omr)} |")
     lines.append("")
     # Per-clip within_r for the leader, so per-clip weak spots are visible.
     if summaries:
@@ -230,7 +239,7 @@ def _write_leaderboard(summaries: list[ModeSummary], rows: list[ModeClipRow],
                          f"**{statistics.mean(r.median_px for r in br):.1f}** | "
                          f"**{statistics.mean(r.oracle_within_r for r in br):.3f}** | n/a |")
         lines.append("")
-    LEADERBOARD_MD.write_text("\n".join(lines))
+    LEADERBOARD_MD.write_text("\n".join(lines), encoding="utf-8")
     print(f"\nleaderboard -> {LEADERBOARD_MD}")
 
 

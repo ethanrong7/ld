@@ -42,8 +42,7 @@ from ld.detect.eval_modes import _default_clips
 from ld.detect.fusion import detect_fusion_clip
 from ld.detect.identity import _centroid, _seed
 from ld.detect.hedge_probe import _affines, _read_track, _hit, _churn_hedge
-from ld.detect.sheet_residual_probe import _inv, _nearest
-from ld.detect.resid_override_probe import _resid_cache
+from ld.detect.probe_common import _inv, _nearest, _resid_cache
 
 STRONG = {"t2", "t6", "t7", "t9", "t10"}
 LAGGARD = {"t1", "t5", "t8"}

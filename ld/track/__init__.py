@@ -1,3 +1,5 @@
-from ld.track.tracker import OutlierTracker, TrackPoint
+"""Output-layer track utilities (human-cursor dynamics)."""
 
-__all__ = ["OutlierTracker", "TrackPoint"]
+from ld.track.humanize import HumanCursor, humanize_track
+
+__all__ = ["HumanCursor", "humanize_track"]

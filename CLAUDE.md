@@ -37,47 +37,40 @@ source .venv/bin/activate
 
 The best model is `yolov8n_single_combined` (single-class, oracle 0.958). Weights are not committed to the repo — you must train locally. Takes ~12 min on M3 Pro, longer on Windows/CPU.
 
+The single-class dataset is built from `data/detect/s_frames` + `data/detect/s_labels_single`
+(canonical paths in `ld/config.py` as `TRAIN_*`).
+
 **Mac/Linux:**
 ```bash
-.venv/bin/python -m ld.detect.build_s_dataset \
-    --labels-dir data/detect/s_labels_single \
-    --out-dir data/detect/dataset_single_combined
-
-.venv/bin/python -m ld.detect.train \
-    --data data/detect/dataset_single_combined/dataset.yaml \
-    --name yolov8n_single_combined
+.venv/bin/python -m ld.detect.build_dataset      # -> data/detect/dataset_single_combined
+.venv/bin/python -m ld.detect.train --name yolov8n_single_combined
 ```
 
 **Windows:**
 ```powershell
-.venv\Scripts\python.exe -m ld.detect.build_s_dataset --labels-dir data/detect/s_labels_single --out-dir data/detect/dataset_single_combined
-
-.venv\Scripts\python.exe -m ld.detect.train --data data/detect/dataset_single_combined/dataset.yaml --name yolov8n_single_combined
+.venv\Scripts\python.exe -m ld.detect.build_dataset
+.venv\Scripts\python.exe -m ld.detect.train --name yolov8n_single_combined
 ```
 
 Weights will be saved to `data/detect/runs/yolov8n_single_combined/weights/best.pt`.
+To add new training data, just drop a video in `data/` and run `python -m ld.detect.annotate`
+(it discovers, crops, extracts 5 in-play frames, labels, rebuilds, and prints the train command).
 
-### 4. Generate evidence videos for all identity methods
+### 4. Generate the evidence video (leader)
 
-Run evidence renders for all competitive identity modes across t1–t10:
-
-**Mac/Linux:**
 ```bash
-for mode in fpath_freeze field_coh field_lag field; do
-    .venv/bin/python -m ld.detect.render_evidence \
-        --weights data/detect/runs/yolov8n_single_combined/weights/best.pt \
-        --mode $mode
-done
+# Mac/Linux
+.venv/bin/python -m ld.detect.render_evidence \
+    --weights data/detect/runs/yolov8n_single_combined/weights/best.pt --mode fpath_human
 ```
-
-**Windows:**
 ```powershell
-foreach ($mode in @("fpath_freeze", "field_coh", "field_lag", "field")) {
-    .venv\Scripts\python.exe -m ld.detect.render_evidence --weights data/detect/runs/yolov8n_single_combined/weights/best.pt --mode $mode
-}
+# Windows
+.venv\Scripts\python.exe -m ld.detect.render_evidence --weights data/detect/runs/yolov8n_single_combined/weights/best.pt --mode fpath_human
 ```
 
-Output: `data/detect/evidence/<clip>_<mode>.mp4`
+Output: `data/detect/evidence/<clip>_<mode>.mp4` (any mode in `identity.ALL_MODES` is renderable
+via `--mode`). The 2026-06-22 cleanup removed the field/paper/accum/chain families and the old
+OutlierTracker solver; the `fpath` lineage is all that remains.
 
 ---
 
@@ -87,9 +80,12 @@ Output: `data/detect/evidence/<clip>_<mode>.mp4`
 
 2. **Identity** — decides *which* box is the real shape over time. This is the bottleneck and the entire focus of remaining work. Code in `ld/detect/identity.py`.
 
-## Current best: `fpath_freeze` (0.932 within_r)
+## Current best: `fpath_human` (0.940 within_r) — box engine `fpath_freeze` (0.932)
 
-`fpath_freeze` is the leader (verified full-board `eval_modes` + honest LOO, 2026-06-20, against `yolov8n_single_combined`). It is `fpath_hedge` **plus a residual-gated decode-layer freeze** that runs BEFORE the churn hedge. The whole win comes from answering a **1-box BINARY** question — *"is the box I am currently holding a rigid fake?"* — which is sharp where the 15-box *ranking* (`fpath_resid` override, EXP-Q2b) was hopeless. The detector: the chosen box's **cumulative N=30 sheet-frame residual** (its integrated drift relative to the rigid sheet, via the affine back-walk). A fake reads ~9–15px (it moves with the sheet → residual is just detector jitter, a clip-/radius-independent floor); the real shape reads ~45–91px (its accumulated independent drift). When the held box's residual falls below **τ=15** for **1** frame, we have locked onto a fake → FREEZE the output toward a **lagged pre-creep anchor** (the output **6** frames ago, before the creep started) and hold until the residual recovers. It works because the real shape barely moves (median 1.3 px/fr), so an onset-anchored freeze stays within radius for 20+ frame runs. Identity/trellis state is byte-identical to `fpath_hyst`/`fpath_hedge` (decode-layer only). Oracle mean is **0.958** — and `fpath_freeze` (0.932) now sits within ~0.026 of it.
+**The shipped leader is `fpath_human`** (0.940; `fpath_freeze`'s box decisions + a human-cursor
+1-Euro/deadband output filter — see the mode stack below). This section explains `fpath_freeze`,
+the box-decision engine underneath it (byte-identical picks). `fpath_freeze` was the prior leader
+(0.932, verified full-board `eval_modes` + honest LOO, 2026-06-20, against `yolov8n_single_combined`). It is `fpath_hedge` **plus a residual-gated decode-layer freeze** that runs BEFORE the churn hedge. The whole win comes from answering a **1-box BINARY** question — *"is the box I am currently holding a rigid fake?"* — which is sharp where the 15-box *ranking* (`fpath_resid` override, EXP-Q2b) was hopeless. The detector: the chosen box's **cumulative N=30 sheet-frame residual** (its integrated drift relative to the rigid sheet, via the affine back-walk). A fake reads ~9–15px (it moves with the sheet → residual is just detector jitter, a clip-/radius-independent floor); the real shape reads ~45–91px (its accumulated independent drift). When the held box's residual falls below **τ=15** for **1** frame, we have locked onto a fake → FREEZE the output toward a **lagged pre-creep anchor** (the output **6** frames ago, before the creep started) and hold until the residual recovers. It works because the real shape barely moves (median 1.3 px/fr), so an onset-anchored freeze stays within radius for 20+ frame runs. Identity/trellis state is byte-identical to `fpath_hyst`/`fpath_hedge` (decode-layer only). Oracle mean is **0.958** — and `fpath_freeze` (0.932) now sits within ~0.026 of it.
 
 | clip | within_r | oracle | Δ vs fpath_hedge |
 |------|----------|--------|------------------|
@@ -129,11 +125,12 @@ than hand labels), stripped by `strip_pointer` before detection like the s/t cli
 
 **Result — `fpath_freeze` leads here too, and the whole ranking reproduces t1–t10.** Scored over the 13
 valid clips (a03 + a07 excluded: incomplete/static GT). Saved to `ld/detect/LEADERBOARD_additional_evidence.md`
-(canonical t1–t10 board is `LEADERBOARD.md`, backed up to `LEADERBOARD_t1_t10.md`).
+(canonical t1–t10 board is `LEADERBOARD.md`).
 
 | mode | add-evidence (valid-13) | t1–t10 |
 |------|------------------------:|-------:|
-| `fpath_freeze` | **0.837** | 0.932 |
+| `fpath_human` | **0.859** | 0.940 |
+| `fpath_freeze` | 0.837 | 0.932 |
 | `fpath_fuse` | 0.814 | 0.876 |
 | `fpath_hedge` | 0.811 | 0.899 |
 | `fpath_hyst` / `fpath_coh` | 0.800 | 0.878 / 0.825 |
@@ -148,11 +145,12 @@ exactly** — independent cross-dataset confirmation of the lineage. **No method
 
 ## Identity mode stack
 
-The leaderboard default is now the **9 competitive modes** (`identity.BOARD_MODES`); the other 7 in `ALL_MODES` are permanently dominated and retired from routine regens (still runnable via `eval_modes --modes <name>` — see Dead ends).
+The leaderboard default (`identity.BOARD_MODES`) is now **`fpath` + `fpath_human` + an oracle ceiling row**. `ALL_MODES` keeps the full `fpath` lineage (`fpath`, `fpath_coh`, `fpath_fuse`, `fpath_hyst`, `fpath_hedge`, `fpath_freeze`, `fpath_human`) runnable by name (`eval_modes --modes <name>`) so the tuning probes can regenerate their per-mode CSVs. The field/paper/accum/chain/`fpath_reacq` families were removed in the 2026-06-22 cleanup (the table below documents them as history; the rows other than `fpath`/`fpath_human` are no longer dispatchable).
 
 | Mode | within_r | Description |
 |------|----------|-------------|
-| `fpath_freeze` | **0.932** | `fpath_hedge` + residual-gated decode freeze (chosen-box N=30 residual < τ ⇒ on a fake ⇒ freeze to lagged anchor) — current leader |
+| `fpath_human` | **0.940** | `fpath_freeze` + human-cursor output dynamics (1-Euro + 2px deadband on the emitted point) — current leader; box decisions IDENTICAL to `fpath_freeze` |
+| `fpath_freeze` | 0.932 | `fpath_hedge` + residual-gated decode freeze (chosen-box N=30 residual < τ ⇒ on a fake ⇒ freeze to lagged anchor) — the identity/metric reference (byte-identical box picks) |
 | `fpath_hedge` | 0.899 | `fpath_hyst` + decode-layer churn-gated freeze-blend |
 | `fpath_hyst` | 0.878 | `fpath_fuse` + EMA-coherent-mass hysteresis override |
 | `fpath_fuse` | 0.876 | `fpath` + additive `mass + 1.5*coherent_mass + 0.5*curl` emission |
@@ -162,11 +160,15 @@ The leaderboard default is now the **9 competitive modes** (`identity.BOARD_MODE
 | `field_lag` | 0.749 | Fixed-lag confirmation smoother (K=8) over `field` |
 | `field` | 0.744 | Motion-saliency peak tracker + YOLO snap |
 
-**fpath / fpath_coh / fpath_fuse / fpath_hyst / fpath_hedge / fpath_freeze** per frame: a causal forward trellis over YOLO boxes; emission = a weighted sum of normalized motion-evidence channels, transition penalty = `(jump_in_radii)^2`. Decode = argmax cumulative score → that box's centroid feeds a CV predictor. `fpath`=mass only; `fpath_coh`=mass×coherence-bump; `fpath_fuse`=additive mass + windowed coherent-mass + curl (each cross-frame-normalized so weak frames stay low-emission and the transition prior carries — the load-bearing coast trick). `fpath_hyst`=`fpath_fuse` + a distance-agnostic EMA-coherent-mass hysteresis switch that escapes adjacent creep. `fpath_hedge`=`fpath_hyst` + a **decode-layer churn-gated freeze-blend** on the OUTPUT (identity state untouched): when the chosen box's recent sheet-removed motion is large but directionally incoherent (a box-hop), freeze the output toward its last value; when coherent (real-shape burst) or small (stable), commit — catches the *swept* locks. `fpath_freeze`=`fpath_hedge` + a **residual-gated freeze** running BEFORE the hedge: maintain the chosen box's cumulative N=30 sheet-frame residual (the affine back-walk in `identity._cumulative_residual`); when it collapses below τ=15px (a 1-box "am I on a rigid fake?" test) freeze the output toward the output-from-`lag`-frames-ago and hold until it recovers — catches the *coherent* identity-locks the churn gate is blind to. Together the two freezes cover both miss modes. Tune fuse weights via `ld/detect/fuse_sweep.py`, the hysteresis via `ld/detect/exp3_sweep.py`, the hedge's `churn_hi` via `ld/detect/hedge_probe.py`, the freeze's `τ/lag/consec` via `ld/detect/resid_freeze_probe.py` (all LOO, channels/affines/residuals precomputed once per clip). **Reusable insights:** (1) accumulate evidence on moving boxes with a *nearest-centroid-carried EMA*, not a fixed window (EXP-3: EMA on-GT 0.51 vs fixed-window 0.39 on t1); (2) when you can't name the box, hedge the *position* — gate the hedge on trajectory **coherence** (`(1−R)`), not magnitude; (3) a signal too weak to RANK boxes can still be sharp as a 1-box BINARY — the integrated residual fails as a 15-box override (EXP-Q2b) but works as "is *this* box a fake?" (EXP-Q3); (4) cap a threshold sweep at the physically-motivated value (the fake-noise floor) so the LOO can't pick an unphysical knob that overfits.
+**fpath / fpath_coh / fpath_fuse / fpath_hyst / fpath_hedge / fpath_freeze** per frame: a causal forward trellis over YOLO boxes; emission = a weighted sum of normalized motion-evidence channels, transition penalty = `(jump_in_radii)^2`. Decode = argmax cumulative score → that box's centroid feeds a CV predictor. `fpath`=mass only; `fpath_coh`=mass×coherence-bump; `fpath_fuse`=additive mass + windowed coherent-mass + curl (each cross-frame-normalized so weak frames stay low-emission and the transition prior carries — the load-bearing coast trick). `fpath_hyst`=`fpath_fuse` + a distance-agnostic EMA-coherent-mass hysteresis switch that escapes adjacent creep. `fpath_hedge`=`fpath_hyst` + a **decode-layer churn-gated freeze-blend** on the OUTPUT (identity state untouched): when the chosen box's recent sheet-removed motion is large but directionally incoherent (a box-hop), freeze the output toward its last value; when coherent (real-shape burst) or small (stable), commit — catches the *swept* locks. `fpath_freeze`=`fpath_hedge` + a **residual-gated freeze** running BEFORE the hedge: maintain the chosen box's cumulative N=30 sheet-frame residual (the affine back-walk in `identity._cumulative_residual`); when it collapses below τ=15px (a 1-box "am I on a rigid fake?" test) freeze the output toward the output-from-`lag`-frames-ago and hold until it recovers — catches the *coherent* identity-locks the churn gate is blind to. Together the two freezes cover both miss modes. `fpath_human`=`fpath_freeze` + a **human-cursor output-dynamics filter** applied as the LAST transform on the emitted point (`ld/track/humanize.py`, `HumanCursor`): a strictly-causal **1-Euro filter** (speed-adaptive low-pass — heavy smoothing at rest kills the lock-wobble, light smoothing on bursts avoids lag) + a **2px deadband** (don't chase sub-pixel detector noise). Box decisions are BYTE-IDENTICAL to `fpath_freeze` — it only reshapes *how the point moves between them* (jitter ↓, freeze-snaps eased into glides). It is the first decode-layer transform that improved BOTH smoothness AND `within_r` (the smoothing kills jitter-induced single-frame pop-outs): **+0.008 t1–t10 (0.932→0.940), +0.022 add-board (0.837→0.859), flat-or-up on every clip, RMS jerk −61%/−65%, velocity-reversals −97%/−98%**. Tune fuse weights via `ld/detect/fuse_sweep.py`, the hysteresis via `ld/detect/exp3_sweep.py`, the hedge's `churn_hi` via `ld/detect/hedge_probe.py`, the freeze's `τ/lag/consec` via `ld/detect/resid_freeze_probe.py`, the human-cursor `min_cutoff/beta/deadband/v_max/lag` via `ld/detect/cursor_physics_probe.py` (all LOO, channels/affines/residuals precomputed once per clip). **Reusable insights:** (1) accumulate evidence on moving boxes with a *nearest-centroid-carried EMA*, not a fixed window (EXP-3: EMA on-GT 0.51 vs fixed-window 0.39 on t1); (2) when you can't name the box, hedge the *position* — gate the hedge on trajectory **coherence** (`(1−R)`), not magnitude; (3) a signal too weak to RANK boxes can still be sharp as a 1-box BINARY — the integrated residual fails as a 15-box override (EXP-Q2b) but works as "is *this* box a fake?" (EXP-Q3); (4) cap a threshold sweep at the physically-motivated value (the fake-noise floor) so the LOO can't pick an unphysical knob that overfits; (5) `within_r` rewards *position*, so an output-dynamics smoother (1-Euro) that kills per-frame jitter is not a tax but a small LIFT — the jitter caused single-frame radius pop-outs that smoothing removes (`fpath_human`, +0.008/+0.022 both boards while making the dot human-like).
 
-**field** per frame: `motion.py` fits global rigid sheet motion (RANSAC), treats outlier features as evidence, blurs into a saliency field → `OutlierTracker` follows the peak with a gated CV model → snapped to the highest-saliency YOLO box. Snap is load-bearing (field raw ≈ 0.28, field+snap ≈ 0.59). The `field` family beats `fpath_coh` on t1 (0.84 vs 0.70) — no path memory to lock in.
-
-**field_coh** adds directional coherence of residual vectors as an escape-from-lock-in override — fires when a far challenger is persistently coherent for ≥8 frames.
+**field family (REMOVED 2026-06-22, documented for history).** The non-trellis `field`/`field_lag`/`field_coh`
+modes and their `OutlierTracker` backbone (`ld/track/tracker.py`) were deleted in the cleanup — all were
+dominated by the `fpath` lineage (≤0.773 vs 0.940). For the record: **field** fit global rigid sheet motion
+(RANSAC) in `motion.py`, treated outlier features as a saliency field, followed the peak with a gated CV
+tracker, and snapped to the highest-saliency YOLO box (snap was load-bearing: raw ≈ 0.28 → +snap ≈ 0.59);
+**field_coh** added a coherence far-jump override. They beat `fpath_coh` on t1 (no path memory to lock in),
+which is why they were kept on the board for a while before the decode-layer freezes closed that gap.
 
 ## Detection model history
 
@@ -187,29 +189,25 @@ The leaderboard default is now the **9 competitive modes** (`identity.BOARD_MODE
 
 ## How to train YOLO
 
-Training data: `data/detect/s_frames/` (PNGs) + `data/detect/s_labels_single/` (YOLO .txt, single class). 60 frames across s1–s12 + 5 t1 edge frames, ~12 boxes/frame.
+Training data: `data/detect/s_frames/` (PNGs) + `data/detect/s_labels_single/` (YOLO .txt, single class). ~12 boxes/frame. Canonical paths are the `TRAIN_*` constants in `ld/config.py`.
 
 ```bash
-# 1. Build the dataset
-python -m ld.detect.build_s_dataset \
-    --labels-dir data/detect/s_labels_single \
-    --out-dir data/detect/dataset_single_combined
+# Add new data: drop a video in data/, then one interactive session does it all
+# (discover -> board-crop -> extract 5 in-play frames -> single-class label -> rebuild)
+python -m ld.detect.annotate
+python -m ld.detect.annotate --skip-extract    # re-annotate already-extracted frames
 
-# 2. Train (~12 min on M3 Pro)
-python -m ld.detect.train \
-    --data data/detect/dataset_single_combined/dataset.yaml \
-    --name yolov8n_single_combined
-
+# Build the dataset on its own + train (~12 min on M3 Pro)
+python -m ld.detect.build_dataset
+python -m ld.detect.train --name yolov8n_single_combined
 # Weights: data/detect/runs/yolov8n_single_combined/weights/best.pt
 ```
 
-Re-annotate or add frames:
-```bash
-python -m ld.detect.annotate_s --skip-extract   # re-annotate existing frames
-python -m ld.detect.annotate_s                  # extract new frames + annotate
-```
+`annotate` extracts only **in-play** frames (no countdown / START / success overlay — the
+longest run clean of large bright blobs) and crops raw screen captures to the 744×498 board
+via `ld/detect/board_crop.py` (shared with `make_additional_evidence.py`).
 
-Annotator controls: `f`=full mode, `x`=partial mode, click existing box=toggle class, `t`=toggle last, `u`=undo, `n`=next, `p`=prev, `q`=quit.
+Annotator controls: drag=draw box, `u`=undo, `c`=clear, `n`/space=next, `p`=prev, `s`=save, `q`=quit. Single class ("shape") — box every shape on the sheet.
 
 Key training notes:
 - Always use `yolov8n.pt` (pretrained COCO), not random init.
@@ -223,33 +221,29 @@ Key training notes:
 python -m ld.detect.eval_modes --weights data/detect/runs/yolov8n_single_combined/weights/best.pt
 
 # Single mode / subset (fast) — NOTE: overwrites LEADERBOARD.md
-python -m ld.detect.eval_modes --weights .../best.pt --modes fpath --clips t4 t8
-
-# Honest held-out LOO
-python -m ld.detect.loo --weights .../best.pt
+python -m ld.detect.eval_modes --weights .../best.pt --modes fpath fpath_human --clips t4 t8
 ```
+
+The default board is `fpath_human` (leader) + `fpath` (ablation base) + an `oracle` ceiling
+row. The intermediate `fpath_*` stages are still runnable by name (`--modes fpath_hyst …`),
+e.g. to regenerate the per-mode eval CSVs the tuning probes read.
 
 Per-frame trace CSVs: `data/detect/eval/<clip>__<mode>.csv`. Primary debugging tool — read to see how a track fails (creep vs jump, which state).
 
-Always quote **LOO** numbers as the real metric. In-sample is optimistic.
+Always quote LOO numbers (from the tuning probes) as the real metric. In-sample is optimistic.
 
 ## How to generate evidence videos
 
 ```bash
-# All t1–t10 with fpath_freeze (current best)
+# Leader (default)
 python -m ld.detect.render_evidence \
-    --weights data/detect/runs/yolov8n_single_combined/weights/best.pt \
-    --mode fpath_freeze
-
-# Other competitive modes
-python -m ld.detect.render_evidence --weights .../best.pt --mode field_coh
+    --weights data/detect/runs/yolov8n_single_combined/weights/best.pt --mode fpath_human
 
 # Output: data/detect/evidence/<clip>_<mode>.mp4
 ```
 
-Overlay legend: green rectangles = YOLO detections, red circle = `track`, orange = `coast`, grey = `acquire`, cyan crosshair = GT, red line = miss (outside radius).
-
-Excluded from evidence renders: `paper`, `paper_outlier`, `paper_outlier_rank`, `chain` — all well below competitive modes.
+Overlay legend: green rectangles = YOLO detections, red filled dot = the emitted cursor
+guess, cyan crosshair = GT, red line = miss (outside radius).
 
 ## Dead ends (do not revisit without a new angle)
 
@@ -279,10 +273,11 @@ Excluded from evidence renders: `paper`, `paper_outlier`, `paper_outlier_rank`, 
 | Direct outline-rotation discriminator (EXP-R1, `rot_probe`) | Gate failed; t7-sanity broke the estimator | Hypothesis (plan.md): the real tile's **border** spins independently (~1.25°/frame on t7) while fakes stay axis-aligned with the rigid sheet (0.006°/frame) — a human's actual tell. Prior rotation work measured the wrong thing (EXP-1 de-rotated by the *sheet* angle then read *interior* NCC; NCC/log-polar ran full-patch as trackers; `curl` is an indirect LK-flow proxy). This probe measured boundary orientation DIRECTLY: Sobel edge map per box, **interior masked to a boundary annulus** (the fill is orientation-less sloshing specular), then inter-frame rotation via a ±8° rotation-bank-NCC argmax (`rot_bank`) and log-polar+phase-corr (`rot_lp`), accumulated over a 10-frame window. **DEAD, two ways.** (1) **t7 SANITY FAILS:** on the clean clip where the spin is *visually obvious*, rotation ranks the real box #1 only ~0.37–0.40 of all-frames vs mass 0.76 / coh 0.90 — the one provably-rotating tile is not a clear #1, so fakes accumulate comparable rotation from **noise**. A 1.25°/frame spin at r≈25px is a **~0.5px sub-pixel boundary step**, i.e. the same resampling-noise floor that killed EXP-1; mask tuning ([0.35,1.0]→[0.55,1.0]) didn't lift it. (2) **t8 (priority laggard) never separates:** MISS-top1 only ties/marginally beats mass (0.33→0.38) and top-3 is *worse* (0.61–0.67 vs mass 0.80) — bad for a Viterbi emission that leans on top-3 continuity. No single estimator beats both mass AND curl on all of t1/t5/t8 (rot_bank wins t1 0.467, rot_lp wins t5 0.495, both weak on t8). Genuinely orthogonal to the trellis failure (MISS-top1 ≈ all-top1, doesn't collapse on hard frames — unlike mass/coh) but orthogonal-and-weak is exactly what logreg already overfit. Reconfirms the triple-confirmed t8/t5 identity information-limit: the real shape is separable only by independent translation, slowest on drift-locks. Do not re-propose boundary/edge rotation. |
 | Integrated sheet-frame residual as identity (EXP-Q1/EXP-Q2b, `sheet_residual_probe` / `resid_override_probe`) | Measurement real; re-selection DEAD | Hypothesis (plan.md EXP-Q1): the identity wall is an SNR limit, not an information one — per-frame independent translation (~1.3 px/fr) is sub-noise, but **integrating** each box's divergence from rigid sheet prediction over N≈30 frames (affine-chained association, drop chains > radius) should make the real shape's directional drift grow ~N·v above the ~√N·σ noise. **EXP-Q1 was a real positive:** at N≈30 the residual ranks the real box #1 on pooled laggard MISS frames at **0.65–0.68** (t8 0.68) — the *first* channel to beat the mass MISS-top1 wall of 0.32–0.41. **But EXP-Q2b (the persistence-gated hysteresis override, mirroring `fpath_hyst` but keyed on residual-dominance) is DEAD: every config in (N∈{30,45}×margin∈{.15,.30,.50}×K∈{5,8,12}) regresses, worst-clip −0.22..−0.40 on a STRONG clip, laggard-mean itself negative, LOO finds 0 admissible configs → +0.000 raw and hedged.** Root cause: the EXP-Q1 SANITY (real-box residual rank #1 on *correctly-tracked* frames) is clip-dependent and **t7 (0.88) was unrepresentative** — on near-perfect strong clips **t9 0.51, t10 0.57** a fake out-residuals the real box ~half the time, so any residual-keyed switch false-captures and craters them. The 0.68 "on MISS frames" is barely above those clips' baseline all-frame top1 (~0.6): moderately-good-everywhere, never sharp. This **also kills the lock-gate variant** (fire only when held-box residual near the fake-floor) — it needs "real box ⇒ high residual when tracked" as its key, false on t9/t10/t1/t5/t8. Residual-as-identity dead in BOTH forms (additive emission AND override). The EXP-A causal-key wall, reconfirmed: strong isolated top-1 on a curated MISS subset ≠ a track. **BUT the residual is NOT wasted — EXP-Q3 (`fpath_freeze`, shipped, the leader) reuses the very same residual as a 1-box BINARY ("is the box I'm ON a fake?", sharp: ~9–15px fake vs ~45–91px real) rather than a 15-box ranking, and freezes the output — +0.033 board, no per-clip regression. The lesson: a signal too weak to RANK can be sharp as a per-box yes/no.** |
 | Box-dimension rotation pulse discriminator (EXP-S1, `box_pulse_probe`) | Gate failed; t7-sanity broke the readout | Hypothesis (plan.md): a rotating square's tight AABB PULSES in size (side `= s·(\|cosθ\|+\|sinθ\|)`, area up to 2× at 45°) while a rigid fake's box is dead-flat — so the per-box AABB size-oscillation read STRAIGHT OFF THE DETECTOR over a long window is a rotation readout ABOVE the pixel noise floor that killed EXP-1/EXP-R1 (the box is a detector aggregate of thousands of pixels). The deliberate successor to EXP-R1: same observable (rotation), different measurement level (detector geometry) to dodge the sub-pixel floor; and rotation doesn't stop when translation stalls, so it *could* survive the drift-locks where translation (the info-limit's only signal) goes to zero. Probe read ONLY `packs[idx].boxes` dims (no pixel pass): per box, walk backward by nearest-prev-centroid over window W and collect side `s=√(w·h)`; four pulse stats — `area_cv` (magnitude), `side_ac1` (lag-1 autocorr, the STRUCTURE primary per the hedge lesson), `side_smooth`, `side_trend`. **DEAD, both ways (W=15 and W=25).** (1) **t7 SANITY FAILS:** on the clip where the spin is visually obvious, the best pulse stat ranks the real box #1 only ~0.09–0.11 of all-frames (`side_ac1`) vs mass 0.76 / coh 0.91 — the detector boxes do NOT track the AABB pulse; YOLO box size-jitter (frame-to-frame) swamps the `s·(\|cos\|+\|sin\|)` signal. (2) **Laggards never separate:** every pulse stat's MISS-top1 (best `area_cv` ~0.14 overall) is far below BOTH mass (0.37) AND curl (0.27) on t8/t5/t1 — and the STRUCTURE stats (the "real bet") are *weaker* than the magnitude `area_cv`, near-zero on MISS (`side_ac1` overall MISS-top1 0.007). Longer window (W=25) is WORSE (accumulates more jitter). Confirms the §3 base-case: detector box noise exceeds the pulse, so box-geometry rotation joins interior-appearance (EXP-1) and edge-rotation (EXP-R1) as signal-limited. **There is now NO untested orthogonal identity observable left** — interior appearance, edge/outline rotation, AND box-geometry rotation are all empirically dead. Do not re-propose any form of rotation-as-identity. |
+| In-box point refinement / localization (EXP-LOC, `localize_probe`, 2026-06-21) | Structural hypothesis confirmed; gate failed — no causal key | Hypothesis (plan.md "EMIT A SINGLE TRACED POINT"): the pipeline emits the chosen box's CENTROID, but the GT crosshair sits at a *specific spot on the shape* ≠ centroid when the detector box is oversized/merged (the t5/a03/t3 profile) — so the right box can be chosen and the point still misses. Refining the point *inside the already-chosen box* is a LOCALIZATION lever, separate from the (walled) identity-ranking problem. **The structural claim is REAL:** on correct-box-chosen frames the centroid→GT offset grows monotonically with box size-ratio (centroid-miss% by SR bucket `<1.2/1.2–1.6/1.6–2.5/≥2.5` = 5.0/8.2/12.5/21.0% on t1–t10), and the oracle-localization ceiling is large — GT lies *inside* the chosen box on **0.899** (t) / **0.986** (add) of right-box misses (they'd flip to hits with a perfect localizer). **DEAD anyway, no causal key:** the only available in-box estimators — **saliency-peak** (`saliency_map` argmax in box) and **outlier-weighted-centroid** (`owc`) — are both NOISIER than the raw centroid and net-REGRESS on every clip even ungated (owc mean Δ −0.063 t / −0.090 add, worst −0.130/−0.183; saliency far worse). The plan's **size-ratio-GATED** swap (refine only oversized boxes, keep the centroid elsewhere) nets **negative at every threshold** on both boards (best `sr>3.0`: mean −0.001, worst-clip −0.010 t / −0.003 add) — tightening the gate only converges to zero by swapping nothing. Also the recoverable headroom is tiny on t1–t10 (right-box misses are 89/4965 ≈ 1.8% of correct-box frames → ceiling ≈ +0.016; larger ~7.5% on add). The centroid is already the best CAUSAL point inside the box; the moving sub-cluster sits off the GT more often than the box middle. Same shape as the identity wall — a real signal with no online key. Do not re-propose saliency/owc point refinement; revisit only with a NEW in-box localizer that beats the centroid on *well-sized* boxes (the safety scope), not just the rare oversized ones. (Phase 0 — the filled-red-dot evidence overlay — DID ship; it's metric-neutral.) |
 
 ## Open avenues (highest-EV first)
 
-Target: ≥0.90 mean within_r — **cleared: 0.932** (`fpath_freeze`, full-board; LOO 0.9359), from the 0.899→0.878→0.876→0.825 lineage. **Both** of the last two lifts came from the *decode/output* layer (churn-hedge, then residual-freeze), NOT from cracking identity — `within_r` rewards position, not box-id. Gate every idea with a read-only probe before building; accept only on LOO improvement with no per-clip regression. See `plan.md`/`experiment.md`. Short version of what's left:
+Target: ≥0.90 mean within_r — **cleared: 0.932** (`fpath_freeze`, full-board; LOO 0.9359), from the 0.899→0.878→0.876→0.825 lineage. **Both** of the last two lifts came from the *decode/output* layer (churn-hedge, then residual-freeze), NOT from cracking identity — `within_r` rewards position, not box-id. Gate every idea with a read-only probe before building; accept only on LOO improvement with no per-clip regression. Short version of what's left:
 
 **The big laggard t8 is fixed (0.776→0.909).** `fpath_freeze`'s residual-freeze caught its long coherent fake-rides that the churn hedge was blind to. The new laggards are **t5 (0.858), t4 (0.880), t1 (0.895)** — what remains is shorter locks plus t3/t5's *undersized-box* runs (detection-quality, EXP-2) and t4's residual misses. Next-target ideas:
 
@@ -303,7 +298,7 @@ Remaining ideas, all LOW-EV given the above — gate hard, expect little:
 ## Conventions
 
 - **Strictly causal** for anything shipped. Offline only for diagnostics/ceilings.
-- All identity modes dispatch through `identity._dispatch_mode`. `ALL_MODES` is the full dispatch registry; `BOARD_MODES` (7 competitive modes) is the default `eval_modes` board. Retired modes still run via `eval_modes --modes <name>`.
+- All identity modes dispatch through `identity._dispatch_mode`. `ALL_MODES` is the full `fpath` lineage; `BOARD_MODES` (`fpath`, `fpath_human`) is the default `eval_modes` board (oracle ceiling added as a row). Intermediate `fpath_*` stages still run via `eval_modes --modes <name>`.
 - The green crosshair in clips is **GT only** — `cursor.strip_pointer` inpaints it before any tracking.
 - Accept a change only if it improves **LOO mean with no per-clip regression**.
 - Eval is cache-backed; cache key is md5(path+mtime) of the weights file.
@@ -312,27 +307,45 @@ Remaining ideas, all LOW-EV given the above — gate hard, expect little:
 
 | File | Role |
 |------|------|
-| `ld/detect/identity.py` | All identity modes; `_dispatch_mode`, `ALL_MODES`, `run_clip` |
+| `ld/detect/identity.py` | Identity modes (`fpath`…`fpath_human`); `_dispatch_mode`, `ALL_MODES`, `BOARD_MODES`, `run_clip` |
+| `ld/detect/fusion.py` | `detect_fusion_clip` — cached YOLO detection per clip (`FusionPack`) |
 | `ld/vision/motion.py` | `estimate_motion` (RANSAC), `saliency_map`, `MotionField.outlier_vectors` |
-| `ld/track/tracker.py` | `OutlierTracker` — gated CV peak-follower with reacquire |
 | `ld/vision/cursor.py` | GT crosshair detect + `strip_pointer` inpainting |
 | `ld/detect/eval_modes.py` | Leaderboard harness → `LEADERBOARD.md` |
-| `ld/detect/loo.py` | Leave-one-clip-out honest generalization (field family) |
-| `ld/detect/hedge_probe.py` | `fpath_hedge` gate + churn_hi LOO sweep (decode-layer freeze) |
-| `ld/detect/resid_freeze_probe.py` | `fpath_freeze` gate + τ/lag/consec LOO sweep (residual-gated decode freeze) |
-| `ld/detect/sheet_residual_probe.py` / `resid_override_probe.py` | EXP-Q1 residual measurement / EXP-Q2b override gate (residual-as-ranking, dead) |
-| `ld/detect/render_evidence.py` | Per-clip overlay video renderer |
-| `make_additional_evidence.py` | (repo root, standalone) crop+trim raw `data/*.mp4` captures → `data/additional_evidence/` in s/t format (held-out validation set) |
-| `ld/detect/annotate_s.py` | Frame extraction + drag-to-draw box annotator |
-| `ld/detect/build_s_dataset.py` | Builds YOLO dataset from s_frames/s_labels |
+| `ld/detect/render_evidence.py` | Per-clip overlay video (YOLO boxes + red-dot guess) |
+| `ld/track/humanize.py` | `HumanCursor` (1-Euro + deadband) + `humanize_track` — output dynamics (`fpath_human`) |
+| **Training** | |
+| `ld/detect/annotate.py` | Discover + board-crop + extract 5 in-play frames + single-class annotate |
+| `ld/detect/board_crop.py` | Board detection + crop (shared with `make_additional_evidence.py`) |
+| `ld/detect/build_dataset.py` | Builds the single-class YOLO dataset; prints the train command |
 | `ld/detect/train.py` | Fine-tunes YOLOv8n from COCO-pretrained weights |
-| `ld/config.py` | Tracker / detection / motion tunables |
+| `ld/detect/infer.py` | Run weights on held-out frames for a by-eye box check |
+| `make_additional_evidence.py` | (repo root) crop+trim raw `data/*.mp4` → `data/additional_evidence/` (held-out set) |
+| **Tuning probes (LOO, kept for retuning the leader)** | |
+| `ld/detect/fuse_sweep.py` / `exp3_sweep.py` | fuse-weight / hysteresis LOO sweeps |
+| `ld/detect/hedge_probe.py` | `fpath_hedge` churn_hi LOO sweep |
+| `ld/detect/resid_freeze_probe.py` | `fpath_freeze` τ/lag/consec LOO sweep |
+| `ld/detect/cursor_physics_probe.py` | `fpath_human` 1-Euro/deadband LOO sweep |
+| `ld/detect/probe_common.py` | Shared helpers for the above probes |
+| `ld/config.py` | Tracker / detection / motion / training (`TRAIN_*`) / human-cursor tunables |
 
 ## Session experiment log (don't retry — quick index)
 
 Compact list so an agent knows what has already been run and what NOT to retry. Full reasoning for the
 detailed ones is in the Dead ends table above; numbered EXP-* hypotheses live (or lived) in `plan.md`.
 
+- **DONE / SHIPPED — human-cursor output dynamics (`fpath_human`, `ld/track/humanize.py`, `cursor_physics_probe.py`, 2026-06-21).**
+  The "make the emitted (x,y) move like a hand" plan. A strictly-causal **1-Euro filter + 2px deadband** applied as
+  the LAST transform on the emitted point (decode-layer only; box decisions byte-identical to `fpath_freeze`).
+  Gated OFFLINE on the eval CSVs (no detector re-run): swept `(min_cutoff, beta, deadband, v_max, a_max, lag)`;
+  the simplest config (1-Euro `min_cutoff=1.0, beta=0.007` + `deadband=2`) was the single config admissible on
+  BOTH full boards. **Result: within_r +0.008 t1–t10 (0.932→0.940) / +0.022 add (0.837→0.859), flat-or-up on
+  every clip (worst −0.003, a single-frame flip within tolerance), RMS jerk −61%/−65%, velocity-reversals
+  −97%/−98%, p99 jump 47→31 / 44→27 px.** First decode-layer transform to improve smoothness AND within_r (the
+  smoothing removes jitter-induced single-frame radius pop-outs). **PD steering (bounded-velocity) and fixed-lag
+  (L=8/12) both REGRESSED within_r** (PD worst −0.014..−0.022; lag worst −0.023..−0.071 — over-smoothed/lagged
+  off fast bursts) and were dropped — 1-Euro alone (the cheapest layer) was the win, matching the project's
+  fewer-params-generalize lesson. Tune via `cursor_physics_probe.py`; params in `ld/config.py` (`HUMAN_*`).
 - **EXP-L1 — fixed-lag bidirectional decode smoother (`lag_smooth_probe.py`) — WEAK, PARKED.** Emit frame
   `t−L` after seeing `t±L`, replace the chosen position with a radius-bounded robust fit (median/Theil–Sen)
   when its excursion exceeds the physical bound (p99 17.8 / max 44.7). Gate result: the catastrophic 200–400px
@@ -351,6 +364,14 @@ detailed ones is in the Dead ends table above; numbered EXP-* hypotheses live (o
   *correctly-tracked* strong clips t9 0.51 / t10 0.57 — t7's 0.88 was unrepresentative), never sharp enough to
   re-select boxes without false-capturing and cratering the strong clips. Confirms ~0.90 is this stack's identity
   ceiling; the remaining floor work is **detection-quality** (EXP-2 undersized boxes), not a new identity channel.
+- **DONE / DEAD — in-box point refinement / localization (EXP-LOC, `localize_probe.py`, 2026-06-21).** The
+  "emit a traced point not a box" pivot (plan.md). Phase 0 (filled-red-dot evidence overlay) SHIPPED. Phase 1
+  gate confirmed the *structural* claim — centroid→GT offset grows with box size-ratio, and GT lies inside the
+  chosen box on 0.899 (t) / 0.986 (add) of right-box misses (a real oracle-localization ceiling) — **but failed
+  on causal key:** the available in-box estimators (saliency-peak, outlier-weighted-centroid) are noisier than
+  the raw centroid and net-regress on every clip; the size-ratio-gated swap nets negative at every threshold
+  (best `sr>3.0` mean −0.001, worst-clip still <0). Phase 2 NOT built. The centroid is already the best causal
+  in-box point; recoverable headroom on t1–t10 is only ~1.8% of correct-box frames. Don't re-propose saliency/owc.
 
 ### Already dead — do NOT retry (one-liners; see Dead ends table for why)
 
