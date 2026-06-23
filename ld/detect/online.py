@@ -121,6 +121,7 @@ class LdOnlineTracker:
         self._last_white_idx = -1
         self._white_misses = 0
         self._seen_white = False
+        self._cd_hover: tuple[float, float] | None = None   # live countdown-hover point
         # track-phase machine state (initialised at handoff in _begin_track)
         self._pos = None
         self._vel = None
@@ -208,13 +209,37 @@ class LdOnlineTracker:
             self._white_misses += 1
 
         if not (self._seen_white and self._white_misses >= _MISS_TO_CONFIRM):
-            return None   # still inside the countdown -> nothing to emit yet
+            # Still inside the countdown -> hover the cursor on the real (white) shape
+            # so it is on-target before the lock, instead of emitting nothing.
+            return self._countdown_hover(pack)
 
         # Countdown confirmed ended at this frame. Compute seed + lock exactly as the
         # batch path (compute_countdown_lock), using the buffered packs + the stripped
         # frame at the lock index (held in the rolling buffer).
         self._compute_lock()
         return self._replay_handoff()
+
+    def _countdown_hover(self, pack: FusionPack):
+        """Live-output hover during the countdown / fade-in.
+
+        The white-shape detection IS the real shape during the countdown (it glows
+        white then fades -- it's the very anchor the lock seeds from), so pointing the
+        cursor at it puts us on-target from the first frame. We snap the white centroid
+        to the nearest detected box centre (the shape middle) and HOLD the last position
+        through the fade frames where the white briefly drops out (``pack.white is None``
+        but the countdown has not yet confirmed-ended).
+
+        Output-ONLY: it does not append to ``self.track`` or mutate any acquire/track
+        state, so the scored handoff track stays byte-identical to batch ``fpath_human``
+        (the ``test_online`` faithfulness contract). Returns ``None`` only before the
+        first white is ever seen (nothing to point at yet)."""
+        if pack.white is not None:
+            wx, wy = float(pack.white[0]), float(pack.white[1])
+            if pack.boxes:
+                wx, wy = min((_centroid(b) for b in pack.boxes),
+                             key=lambda c: (c[0] - wx) ** 2 + (c[1] - wy) ** 2)
+            self._cd_hover = (wx, wy)
+        return self._cd_hover
 
     def _compute_lock(self) -> None:
         packs = self._cd_packs

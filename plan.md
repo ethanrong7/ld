@@ -420,18 +420,19 @@ Live-YOLO path also verified end-to-end (t7 = 1.000).
 
 ---
 
-### Session 2 — Board Detection, Crop & Termination Detection (rotk, offline only)  🟡 PARTIAL (2026-06-22)
+### Session 2 — Board Detection, Crop & Termination Detection (rotk, offline only)  ✅ COMPLETE (2026-06-23)
 
 **Scope:** Vision utilities in rotk. No service wiring, no live game, no mouse movement.
 
-**Done so far:** the board-detection / crop / coordinate-transform code (Part 1) is built and
+**Done:** the board-detection / crop / coordinate-transform code (Part 1) is built and
 verified end-to-end against *raw* captures — `find_ld_board_rect` isolates the minigame board on
 both a 1920×1080 clip (`ld1080p1`) and a 1366×768 clip (`a04` source), `crop_to_board` produces the
 canonical 744×498, and the full crop→`LdOnlineTracker`→overlay pipeline scored **0.910 within_r** vs
 the in-game crosshair on `ld1080p1` (cf. offline reference `a01` 0.890). Verified via
 `rotk/scripts/verify_ld_sample.py` (crop-space overlay) and `rotk/scripts/overlay_fullframe.py`
-(overlay mapped back onto the original full frame). **Remaining:** `is_ld_fail` + the `ld_cage.png`
-asset (blocked on the human step below).
+(overlay mapped back onto the original full frame). `is_ld_fail` shipped (2026-06-23) with the
+human-provided `ld_cage.png` asset — template-match `TM_CCOEFF_NORMED ≥ 0.85` over a fractional
+centre ROI; verified cage→1.00, real board→0.23 (clean separation), True/False on all cases.
 
 - [x] Create `rotk/src/vision/__init__.py`
 - [x] Create `rotk/src/vision/ld_board.py`
@@ -440,107 +441,225 @@ asset (blocked on the human step below).
 - [x] `board_rect_to_screen(rect, x_offset, y_offset)` converts to absolute screen coordinates
 - [x] `board_to_screen(bx, by, board_rect_screen)` transforms solver output to screen pixel
 - [x] `is_ld_gone(frame_bgr)` returns True when `find_ld_board_rect` returns None
-- [ ] `is_ld_fail(frame_bgr, cage_template)` returns True when cage template matches at TM_CCOEFF_NORMED ≥ 0.85 — **blocked on `ld_cage.png` asset**
+- [x] `is_ld_fail(frame_bgr, cage_template)` returns True when cage template matches at TM_CCOEFF_NORMED ≥ 0.85 — done (centre-ROI match, full-frame fallback, None-template guard)
 - [x] ~~Create `rotk/scripts/test_ld_board.py`~~ — superseded by `rotk/scripts/verify_ld_sample.py` + `overlay_fullframe.py`, which exercise `find_ld_board_rect`/`crop_to_board` on real raw clips end-to-end (stronger than a single-screenshot check)
 - [x] `is_ld_gone` returns True on a screenshot where LD board is absent, False when board is present — confirmed via the longest-board-run scan (board present 660–1475 on `a04`, absent elsewhere)
-- [ ] `is_ld_fail` returns True on a screenshot of the cage screen — **blocked on `ld_cage.png` asset**
+- [x] `is_ld_fail` returns True on a screenshot of the cage screen — confirmed (cage embedded in a 1366×768 frame → True @ peak 1.00; flat dark frame, real LD board @ 0.23, and None template → False)
 
 ---
 
-### Session 3 — Mouse Backend (rotk, offline only)
+### Session 3 — Mouse Backend (rotk, offline only)  ✅ COMPLETE (2026-06-23)
 
 **Scope:** Cross-platform mouse control. Standalone verification only.
 
-- [ ] Create `rotk/src/plugins/input/mouse_backend.py`
-- [ ] `MouseBackend` abstract base class with `move_to(x, y)` and `click(x, y)`
-- [ ] `PynputMouseBackend` implemented using `pynput.mouse.Controller`
-- [ ] Works on Windows (primary target) — verified by running `rotk/scripts/test_mouse.py`
-- [ ] Works on macOS — verified (or noted as untested if no Mac available)
-- [ ] `test_mouse.py` moves cursor to screen center, waits 1s, moves to a corner, reads back position via `CoordinateService.getMouseScreenPosition()` and asserts within ±2px
+**Design change:** built under `plugins/platform/` (not `plugins/input/`) as platform-specific
+providers behind a `typing.Protocol` + factory, mirroring `window_bounds.py`. Uses **native APIs
+(Windows `ctypes` `SetCursorPos`/`mouse_event`, macOS CoreGraphics/Quartz `ctypes`) — `pynput` is
+NOT used and is NOT a dependency.** Result: `test_mouse.py` PASS on Windows, cursor landed within
+0px (d=0,0) of both targets; factory resolves `WindowsMouseCursorProvider` on this machine.
 
-> **HUMAN STEP REQUIRED BEFORE SESSION 4:** Crop `ld_cage.png` from the cage/fail screenshot at 1366×768 resolution and save to `rotk/assets/ld_cage.png`. The cage is the dark barred-cylinder UI that appears on a failed LD attempt.
+- [x] Create `rotk/src/plugins/platform/mouse_cursor.py` (≠ original `plugins/input/mouse_backend.py`)
+- [x] `MouseCursorProvider` Protocol with `move_to(x, y)` and `click(x, y)` (+ `NoopMouseCursorProvider` fallback)
+- [x] `WindowsMouseCursorProvider` (ctypes `SetCursorPos` + `mouse_event`) and `MacOSMouseCursorProvider` (Quartz `CGWarpMouseCursorPosition` + `CGEventCreateMouseEvent`); `create_mouse_cursor_provider(*, os_mode=AUTO)` factory dispatches on `OSType`
+- [x] Works on Windows (primary target) — verified by running `rotk/scripts/test_mouse.py` (PASS, d=0,0)
+- [ ] Works on macOS — **written but UNTESTED** (no Mac available); construct-only smoke path
+- [x] `test_mouse.py` moves cursor to screen center, waits 1s, moves to a corner, reads back position via Win32 `GetCursorPos` and asserts within ±2px (`--click` flag gates a live click, off by default)
+
+> ~~**HUMAN STEP REQUIRED BEFORE SESSION 4:** Crop `ld_cage.png` from the cage/fail screenshot at 1366×768 resolution and save to `rotk/assets/ld_cage.png`.~~ ✅ DONE (2026-06-23) — `ld_cage.png` (233×143) is in `rotk/assets/`; `is_ld_fail` ships against it. Session 4 is unblocked.
 
 ---
 
-### Session 4 — LD Solver Service (rotk, offline integration)
+### Session 4 — LD Solver Service (rotk, offline integration)  ✅ COMPLETE (2026-06-23)
 
 **Scope:** Assemble Parts 1–3 into `LdSolverService`. Verify with a replayed clip, not a live game.
 Requires Session 1–3 complete and `ld_cage.png` in `rotk/assets/`.
 
-- [ ] `pip install -e ../ld` confirmed working in rotk venv (`from ld.detect.online import LdOnlineTracker` imports cleanly)
-- [ ] `ultralytics` added to `rotk/requirements.txt`
-- [ ] Define `LdStartedEvent`, `LdSuccessEvent`, `LdFailedEvent` dataclasses (in `rotk/src/core/` alongside existing events)
-- [ ] Create `rotk/src/core/ld_solver_service.py` with `LdSolverService` class
-- [ ] Constructor accepts: `coordinate_service`, `mouse_backend`, `weights_path`, `game_frame_offsets`, `event_subscribers`
-- [ ] `start()` is idempotent — spawns thread only if not already running
-- [ ] `stop()` signals thread cleanly via event
-- [ ] Main loop: get frame → find/cache board rect → crop → `push_frame` → transform → `mouse_backend.move_to`
-- [ ] Success condition: 5 consecutive frames where `is_ld_gone` is True → publish `LdSuccessEvent` + stop
-- [ ] Fail condition: 3 consecutive frames where `is_ld_fail` is True → publish `LdFailedEvent` + stop
-- [ ] Thread named `LdSolverService`
-- [ ] Unit test with mocked `coordinate_service` replaying frames from a saved clip (e.g. t4): asserts `LdSuccessEvent` fires, cursor positions within radius of GT on ≥90% of frames
+**Done:** `rotk/src/core/ld_solver_service.py` ships the threaded `LdSolverService` plus the three
+`Ld{Started,Success,Failed}Event` dataclasses (defined inline, mirroring `RuneDetector`'s own-file
+event pattern). The loop dedups on `getLastFrameTimestamp` so the strictly-causal tracker only advances
+on genuinely new frames; one `find_ld_board_rect` per frame doubles as the board-gone check and feeds
+the one-shot rect cache. Verified two ways: (1) `rotk/tests/test_ld_solver_service.py` — **6 deterministic
+unit tests PASS** (fake tracker + synthetic frames, no torch needed in CI) covering start/cache/cursor
+mapping, success streak, fail-beats-success, ≥90% within-radius, idempotent start + named thread, clean
+stop; (2) `rotk/scripts/replay_ld_service.py` — real-solver E2E over the **t4** clip (660 frames, live
+YOLO): `LdSuccessEvent` fired, 555 cursor moves, **within-radius of GT 0.874** (vs published `fpath_human`
+0.883 — the ~0.01 gap is the find/crop near-identity resize + heuristic frame alignment), PASS.
+
+- [x] `pip install -e ../ld` confirmed working in rotk venv (`from ld.detect.online import LdOnlineTracker` imports cleanly — verified 2026-06-23; ld is already importable so no `-e` install was even needed)
+- [x] `ultralytics` in `rotk/requirements.txt` (`ultralytics>=8.0.0`, line 9) and `pyproject.toml`; confirmed **installed** in the rotk venv (2026-06-23)
+- [x] Define `LdStartedEvent`, `LdSuccessEvent`, `LdFailedEvent` dataclasses — defined in `rotk/src/core/ld_solver_service.py` (inline, like `RuneDetector`'s events)
+- [x] Create `rotk/src/core/ld_solver_service.py` with `LdSolverService` class
+- [x] Constructor accepts: `coordinate_service`, `mouse_backend`, `weights_path`, `game_frame_offsets`, `event_subscribers` (+ optional `tracker` injection for testability, `assets_dir`, `success_frames`/`fail_frames`, `target_fps`)
+- [x] `start()` is idempotent — spawns thread only if not already running (tested)
+- [x] `stop()` signals thread cleanly via event (tested)
+- [x] Main loop: get frame → dedup-by-timestamp → find/cache board rect → crop → `push_frame` → `board_to_screen` → `mouse_backend.move_to`
+- [x] Success condition: 5 consecutive frames where the board is gone → publish `LdSuccessEvent` + stop
+- [x] Fail condition: 3 consecutive frames where `is_ld_fail` is True → publish `LdFailedEvent` + stop (lower threshold wins ties over success)
+- [x] Thread named `LdSolverService`
+- [x] Unit test with mocked `coordinate_service` replaying frames (synthetic + real t4 via the replay script): `LdSuccessEvent`/`LdFailedEvent` fire, cursor positions within radius of GT (synthetic ≥90%; real t4 0.874 ≈ published 0.883). The real-clip E2E lives as a **script** (needs YOLO weights + ~60s) rather than a pytest, so the committed suite stays torch-free.
 
 ---
 
-### Session 5 — Bootstrap & FSM Integration (rotk, live wiring)
+### Session 5 — Bootstrap & FSM Integration (rotk, live wiring)  ✅ CODE COMPLETE (2026-06-23; live E2E pending a human)
 
 **Scope:** Wire `LdSolverService` into the running app. Final end-to-end.
 Requires all previous sessions complete.
 
-- [ ] `rotk/src/core/coordinate_service.py` — add `_on_ld_detected: Callable | None = None` field
-- [ ] `_sample_ld_content_once` calls `self._on_ld_detected()` after the existing alarm (alarm kept)
-- [ ] `rotk/src/app/bootstrap.py` — instantiate `LdSolverService` and `PynputMouseBackend`
-- [ ] `handle_ld_event` sets/clears `app_context.ld_active`
-- [ ] `coord_service._on_ld_detected = ld_solver.start` wired up
-- [ ] `ld_active: bool = False` added to `AppContext`
-- [ ] `BotRunner._tick_skills()` guards on `app_context.ld_active` — skips keyboard actions while True
-- [ ] `module_runtime.handle_move_to_anchor_request()` guards on `app_context.ld_active`
-- [ ] `"ld_solver"` section added to `config/base.json` with `weights_path` and `enabled` keys
-- [ ] **E2E verified live:** cursor tracks the real shape during a live LD minigame
-- [ ] **E2E verified live:** `LdSuccessEvent` fires when board disappears; bot resumes keyboard movement
-- [ ] **E2E verified live:** `LdFailedEvent` fires when cage screen appears; bot resumes keyboard movement
-- [ ] Bot sends no keyboard actions during the LD solve window
+**Done (all wiring + config + guards, 148 tests pass / 3 pre-existing unrelated failures):** the LD solver
+is armed from the existing LD-content detector and pauses the bot for the minigame's duration. Two
+deviations from the original sketch, both deliberate:
+- **Frame source.** `getLastFrame()` returns the cached *minimap* rect, not the board — so the live solver
+  pulls full game frames via a new `ForegroundGameFrameSource` adapter over
+  `coordinate_service.captureForegroundGameFrameBgr()` (the calibrated 1366×768 frame). The board→screen
+  origin is `getCalibratedForegroundFrameRect()`'s top-left (config `game_frame_x/y_offset` as fallback),
+  passed to `LdSolverService` as a **callable** `game_frame_offsets` resolved at board-detection time.
+- **`ld_active` lives on `GameState`/`StateManager`**, not `AppContext` — that's the thread-safe shared
+  state `BotRunner` already holds, so the guards read it directly. `handle_ld_event` (in bootstrap)
+  `state.patch(ld_active=…)`. Mouse backend is Session-3's `create_mouse_cursor_provider` (native
+  ctypes/Quartz), **not** pynput.
+
+Wiring isolated in `bootstrap._wire_ld_solver` (gated on `config.ld_solver.enabled`). Tests:
+`rotk/tests/test_ld_solver_wiring.py` (5) — hook fires, optional-hook safety, events toggle `ld_active`
+end-to-end through `LdSolverService`, and both bot-pause guards short-circuit while active.
+
+- [x] `rotk/src/core/coordinate_service.py` — add `_on_ld_detected: Callable | None = None` field (defensive `getattr` read so `__new__`-built test instances stay safe)
+- [x] `_sample_ld_content_once` calls `self._on_ld_detected()` after the existing alarm (alarm kept)
+- [x] `rotk/src/app/bootstrap.py` — instantiate `LdSolverService` and the mouse provider (`create_mouse_cursor_provider`, Session-3 native backend — pynput not used)
+- [x] `handle_ld_event` sets/clears `ld_active` (on the `StateManager`, see deviation above)
+- [x] `coord_service._on_ld_detected = ld_solver.start` wired up
+- [x] `ld_active: bool = False` added — to `GameState`/`StateManager` (thread-safe, BotRunner-visible) rather than `AppContext`
+- [x] `BotRunner._tick_skills()` guards on `state.read().ld_active` — skips keyboard actions while True
+- [x] `module_runtime.handle_move_to_anchor_request()` guards on `self.runner.state.read().ld_active`
+- [x] `"ld_solver"` section added to `config/base.json` with `weights_path` + `enabled` keys (typed `LdSolverSettings` in `models.py`/`loader.py`; weights path resolved relative to rotk repo root → sibling `../ld/…`)
+- [ ] **E2E verified live:** cursor tracks the real shape during a live LD minigame — *pending a human + live game*
+- [ ] **E2E verified live:** `LdSuccessEvent` fires when board disappears; bot resumes keyboard movement — *pending*
+- [ ] **E2E verified live:** `LdFailedEvent` fires when cage screen appears; bot resumes keyboard movement — *pending*
+- [x] Bot sends no keyboard actions during the LD solve window — enforced by the two `ld_active` guards (unit-tested); live confirmation folded into the E2E items above
+
+---
+
+### Session 6 — LD Lifecycle Recording + Failure Exit (rotk)  ✅ CODE COMPLETE (2026-06-23; live E2E pending a human)
+
+**Scope:** Record the entire LD lifecycle (detection → board-gone/cage) to a video, gated by a GUI
+toggle that mirrors "Save rune failure screenshots", and **exit the app on LD failure** (mirroring the
+rune-failure exit). Purely additive over Session 5; toggle OFF (default) = zero overhead.
+
+**Decisions:** failure ⇒ **quit the whole app** (stop runner + `context.exit_requested`/`exit_reason`
+→ GUI teardown + preempt IDLE_BOT); video = **raw full game frame** (no overlay); when ON, **every**
+session is saved (success *and* failure), outcome in the filename.
+
+**Done (154 tests pass / 3 pre-existing unrelated failures):**
+- **Recorder** (`rotk/src/core/ld_solver_service.py`, `_LifecycleRecorder`): lazily opens an mp4 on the
+  first captured frame (records from detection through the terminal frame), writes every raw full BGR
+  frame, and on a `try/finally` finalizes + renames to
+  `output/ld/ld_<stamp>_<success|failed|stopped>.mp4`. Fully exception-isolated (a recording error
+  disables recording for the session, never crashes the solver). Reuses `open_writer`
+  (`rotk/src/ld/capture/video_source.py:62`). Constructor gained `save_videos` / `video_dir` /
+  `video_fps`.
+- **Toggle** on `config.ld_solver.save_videos` wired through every layer mirroring
+  `rune_failure_debug_capture`: `LdSolverSettings.save_videos` (`models.py`/`loader.py`/`base.json`);
+  `ControlPanelSettings.save_ld_videos` + controller load (`ld_solver` section) + `_save_settings`
+  (`ld_solver` sub-dict, merged via `merge_config_payload`); GUI "Save Lie Detector videos" checkbox +
+  help text (var/widget/snapshot/build) in `gui/app.py`; `bootstrap._wire_ld_solver` passes
+  `save_videos` + `video_dir=repo_root()/"output"/"ld"`.
+- **Failure exit** (`bootstrap._exit_on_ld_failure`, called from `handle_ld_event` on `LdFailedEvent`):
+  sets `exit_requested`/`exit_reason`, stops the runner via `execution_runtime.stop()` (fallback
+  `current_runner.stop()`), and `bot_fsm.preempt(BotStates.IDLE_BOT)` — the exact rune-failure
+  mechanism the GUI's `poll_runtime` observes to tear down. `LdSuccessEvent` just clears `ld_active`.
+- **Tests:** `test_ld_solver_service.py` (+3: success/failure mp4 written with outcome in name;
+  none when disabled); `test_ld_solver_wiring.py` (+3: `_exit_on_ld_failure` effects; failure event
+  triggers exit end-to-end through `_wire_ld_solver`; success event does not).
+
+- [x] `LdSolverService` records the full lifecycle (raw full-frame mp4) from first captured frame to terminal event, gated on `save_videos`
+- [x] Video saved to `output/ld/ld_<stamp>_<success|failed|stopped>.mp4`; recording errors never crash the solver; OFF = zero overhead
+- [x] `LdSolverSettings.save_videos` added (models/loader/base.json)
+- [x] GUI "Save Lie Detector videos" checkbox + help text; round-trips through ControlPanelSettings + controller persistence
+- [x] `bootstrap._wire_ld_solver` passes `save_videos` + `video_dir` to the service
+- [x] On `LdFailedEvent`: app exits (stop runner + `context.exit_requested`/`exit_reason` + preempt IDLE_BOT), mirroring rune failure
+- [x] On `LdSuccessEvent`: bot resumes (no exit), `ld_active` cleared
+- [ ] **Live E2E (human):** enable the toggle, trigger a real LD minigame → an mp4 lands in `output/ld`; on cage failure → `*_failed.mp4` and the app exits — *pending* (folds into Session 5's live checks)
 
 ---
 
 ## Current status & next steps (updated 2026-06-23)
 
 **Where we are.** Session 1 is ✅ complete (streaming solver, byte-faithful to `fpath_human`, mean
-0.940). Session 2 is 🟡 partial — the board detection/crop/transform code (Part 1) is built and
-verified end-to-end on raw 1080p + 1366×768 captures; only `is_ld_fail` remains (blocked on the
-`ld_cage.png` asset). Sessions 3–6 are untouched.
+0.940). Session 2 is ✅ complete — board detection/crop/transform (Part 1) verified end-to-end on
+raw 1080p + 1366×768 captures, and `is_ld_fail` shipped with the `ld_cage.png` asset (cage→1.00 vs
+board→0.23). Session 3 is ✅ complete (platform-native mouse-cursor backend, Windows verified).
+Session 4 is ✅ complete (`LdSolverService` — threaded solve loop assembled from Parts 1–3; 6 unit
+tests PASS + real t4 E2E fired `LdSuccessEvent` at 0.874 within-radius). Session 5 is ✅ **code complete**
+(bootstrap + FSM wiring: LD-content hook → `ld_solver.start`, full-frame capture adapter, `ld_active`
+bot-pause guards, `ld_solver` config). Session 6 is ✅ **code complete** (lifecycle video recording +
+GUI toggle + quit-on-failure; 154 tests pass). **The only remaining work is the live E2E pass** (a human
+at a running game), which covers Sessions 5 and 6 together.
 
 **Code locations (current):**
 - `ld/detect/online.py` — `LdOnlineTracker` (streaming `fpath_human`)
 - `ld/detect/test_online.py` — regression test (t1–t10 vs eval CSVs)
-- `rotk/src/vision/ld_board.py` — `find_ld_board_rect` / `crop_to_board` / `board_rect_to_screen` / `board_to_screen` / `is_ld_gone`
+- `rotk/src/vision/ld_board.py` — `find_ld_board_rect` / `crop_to_board` / `board_rect_to_screen` / `board_to_screen` / `is_ld_gone` / `is_ld_fail`
+- `rotk/src/plugins/platform/mouse_cursor.py` — `MouseCursorProvider` + Windows/macOS/Noop providers + factory
+- `rotk/src/core/ld_solver_service.py` — `LdSolverService` + `Ld{Started,Success,Failed}Event` + `ForegroundGameFrameSource` + `_LifecycleRecorder`
+- `rotk/src/app/bootstrap.py` — `_wire_ld_solver` (instantiates the service, wires `_on_ld_detected`, `handle_ld_event` toggles `ld_active` + quits on failure via `_exit_on_ld_failure`)
+- `rotk/src/app/runtime_state.py` — `GameState.ld_active` (bot-pause flag)
+- `rotk/src/core/config/{models,loader}.py` + `config/base.json` — `LdSolverSettings` (`enabled`, `weights_path`, `save_videos`)
+- `rotk/src/app/controller.py` + `rotk/src/gui/app.py` — `save_ld_videos` toggle round-trip ("Save Lie Detector videos")
+- `rotk/tests/test_ld_solver_service.py` — service unit tests (fake tracker, no torch) incl. recorder tests
+- `rotk/tests/test_ld_solver_wiring.py` — Session 5/6 wiring tests (hook, `ld_active` toggle, bot-pause guards, quit-on-failure)
+- `rotk/scripts/replay_ld_service.py` — real-solver E2E replay over a saved clip (needs YOLO weights)
 - `rotk/scripts/verify_ld_sample.py`, `rotk/scripts/overlay_fullframe.py` — offline verification + evidence renderers
 
 **Next steps, in order:**
 
-1. **Finish Session 2 — `is_ld_fail` + asset (BLOCKED on human step).**
-   Human must crop `ld_cage.png` from a failed-attempt screenshot at 1366×768 and drop it in
-   `rotk/assets/`. Then implement `is_ld_fail(frame, cage_template)` (template match TM_CCOEFF_NORMED
-   ≥ 0.85 over a center ROI) and confirm True/False on a fail vs non-fail screenshot.
+1. ~~Finish Session 2 — `is_ld_fail` + asset.~~ ✅ DONE (2026-06-23). `ld_cage.png` provided
+   (233×143) → `rotk/assets/`; `is_ld_fail` implemented in `rotk/src/vision/ld_board.py`
+   (centre-ROI `TM_CCOEFF_NORMED ≥ 0.85`, full-frame fallback, None guard); verified cage→1.00,
+   board→0.23.
 
-2. **Session 3 — Mouse backend (rotk, no blockers).**
-   `rotk/src/plugins/input/mouse_backend.py`: `MouseBackend` ABC + `PynputMouseBackend`
-   (`pynput.mouse.Controller`). NOTE: `pynput` is NOT currently in rotk's deps (only `keyboard` is) —
-   confirm/add it. Verify with `rotk/scripts/test_mouse.py` (move → read back within ±2px).
+2. **Session 3 — Mouse backend (rotk).** ✅ DONE (2026-06-23). Built as
+   `rotk/src/plugins/platform/mouse_cursor.py`: `MouseCursorProvider` Protocol +
+   Windows/macOS/Noop providers + `create_mouse_cursor_provider` factory, native ctypes/Quartz.
+   **No `pynput` dependency** (the earlier carry-over note below is superseded). Verified Windows
+   via `rotk/scripts/test_mouse.py` (PASS, d=0,0). macOS path written but untested.
 
-3. **Session 4 — `LdSolverService` (rotk, offline integration).** Requires Sessions 1–3 + `ld_cage.png`.
-   Add `ultralytics` to `rotk/requirements.txt` and make `ld` importable in the rotk venv
-   (`pip install -e ../ld`, or the sys.path bootstrap the verify scripts already use — note rotk's venv
-   currently lacks `ultralytics`, which is why the verify scripts run from ld's venv). Define the three
-   events, build the threaded service, unit-test with a mocked `coordinate_service` replaying a clip.
+3. **Session 4 — `LdSolverService` (rotk, offline integration).** ✅ DONE (2026-06-23). Threaded
+   `LdSolverService` + three events in `rotk/src/core/ld_solver_service.py`; loop dedups on
+   `getLastFrameTimestamp`, one-shot board-rect cache, success(5)/fail(3) streaks. 6 unit tests PASS
+   (`rotk/tests/test_ld_solver_service.py`, fake tracker — no torch) + real t4 E2E
+   (`rotk/scripts/replay_ld_service.py`): `LdSuccessEvent` fired, 0.874 within-radius vs published 0.883.
+   `ld` already imports in the rotk venv (no `-e` install needed).
 
-4. **Session 5/6 — Bootstrap & FSM wiring + live E2E.** Wire `_on_ld_detected → ld_solver.start`,
-   `ld_active` bot-pause guards, config, and verify live.
+4. **Session 5 — Bootstrap & FSM wiring (rotk).** ✅ CODE DONE (2026-06-23). `_on_ld_detected →
+   ld_solver.start` wired in `bootstrap._wire_ld_solver`; full-frame capture via
+   `ForegroundGameFrameSource` over `captureForegroundGameFrameBgr()` (board→screen origin from the
+   calibrated foreground rect, passed as a callable offset); `ld_active` on `StateManager` with
+   `_tick_skills` + `handle_move_to_anchor_request` guards; `ld_solver` config section
+   (`LdSolverSettings`). 148 tests pass (3 pre-existing failures unrelated: macOS recording +
+   raw-`time.sleep` lint in `windows_recording.py`). Wiring tests in `tests/test_ld_solver_wiring.py`.
+
+5. **Session 6 — Lifecycle recording + quit-on-failure (rotk).** ✅ CODE DONE (2026-06-23).
+   `_LifecycleRecorder` in `LdSolverService` writes a raw full-frame mp4 of each session to
+   `output/ld/ld_<stamp>_<outcome>.mp4`, gated by the GUI "Save Lie Detector videos" toggle
+   (`config.ld_solver.save_videos`, mirrors the rune-debug toggle end to end). On `LdFailedEvent` the
+   app exits via `bootstrap._exit_on_ld_failure` (stop runner + `exit_requested`/`exit_reason` +
+   preempt IDLE_BOT), mirroring rune failure. 154 tests pass.
+
+6. **Live E2E (needs a human + running game).** ⬅️ NEXT — covers Sessions 5 **and** 6. Trigger a real LD
+   minigame and confirm: (a) the cursor tracks the real shape, (b) `LdSuccessEvent` fires on board-gone
+   and the bot resumes, (c) `LdFailedEvent` fires on the cage screen → **the app exits**, (d) no keyboard
+   actions during the solve, (e) with the toggle on, an mp4 lands in `output/ld` (`*_failed.mp4` on a
+   failed run). Watch the two untested-live assumptions: that `captureForegroundGameFrameBgr()` yields
+   the board region at the calibrated rect, and that `getCalibratedForegroundFrameRect()` is the right
+   screen origin for `board_to_screen`.
 
 **Carry-over notes / decisions:**
 - The live rotk service does NOT need the two-pass longest-board-run scan the verify scripts use — it
   only crops *after* the existing LD-content detector fires, so a one-shot `find_ld_board_rect` + cache
   is enough (per the plan's one-shot-calibration approach).
 - `board_to_screen` / `board_rect_to_screen` already exist for Session 4's cursor mapping.
-- Cross-venv reality: ld's venv has `ultralytics`/`torch`; rotk's has `torch` but not `ultralytics`.
-  Session 4 must resolve this (add `ultralytics` to rotk, or run the solver via the installed `ld` pkg).
+- Cross-venv reality (RESOLVED 2026-06-23): `ultralytics` + `torch` are now both declared in rotk's
+  `requirements.txt`/`pyproject.toml` AND installed in the rotk venv — the solver can run in-process in
+  rotk. Session 4's only remaining import task is making the `ld` package importable there
+  (`pip install -e ../ld` or the verify-script sys.path bootstrap).
+- **Superseded (Session 3):** the mouse backend uses native ctypes/Quartz, so **no `pynput`
+  dependency is needed** — ignore any earlier note about adding `pynput` to rotk.

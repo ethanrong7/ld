@@ -8,12 +8,22 @@ MapleStory's "Lie Detector" minigame shows a sheet covered in many **identical**
 
 ## Setup
 
-### 1. Activate virtual environment
+Requires **Python 3.12** (the venv is built against 3.12.x). The `.venv` is **not**
+committed — create it once on a fresh clone, then activate it each session.
+
+### 1. Create the virtual environment (first time only)
+
+**Windows (PowerShell):**
+```powershell
+py -3.12 -m venv .venv      # or: python -m venv .venv  (if `python` is 3.12)
+```
 
 **Mac/Linux:**
 ```bash
-source .venv/bin/activate
+python3.12 -m venv .venv
 ```
+
+### 2. Activate the virtual environment
 
 **Windows (PowerShell):**
 ```powershell
@@ -21,19 +31,29 @@ source .venv/bin/activate
 ```
 > If you get an execution policy error: `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser`
 
-### 2. Install dependencies
-
 **Mac/Linux:**
 ```bash
-.venv/bin/python -m pip install -r requirements.txt
+source .venv/bin/activate
 ```
+
+### 3. Install dependencies
+
+`requirements.txt` is the lean runtime (opencv, numpy, ultralytics). The detector path
+pulls heavy deps (torch) via ultralytics on first install — expect a large download.
 
 **Windows:**
 ```powershell
+.venv\Scripts\python.exe -m pip install --upgrade pip
 .venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-### 3. Train the YOLO model
+**Mac/Linux:**
+```bash
+.venv/bin/python -m pip install --upgrade pip
+.venv/bin/python -m pip install -r requirements.txt
+```
+
+### 4. Train the YOLO model
 
 The best model is `yolov8n_single_combined` (single-class, oracle 0.958). Weights are not committed to the repo — you must train locally. Takes ~12 min on M3 Pro, longer on Windows/CPU.
 
@@ -56,7 +76,7 @@ Weights will be saved to `data/detect/runs/yolov8n_single_combined/weights/best.
 To add new training data, just drop a video in `data/` and run `python -m ld.detect.annotate`
 (it discovers, crops, extracts 5 in-play frames, labels, rebuilds, and prints the train command).
 
-### 4. Generate the evidence video (leader)
+### 5. Generate the evidence video (leader)
 
 ```bash
 # Mac/Linux
